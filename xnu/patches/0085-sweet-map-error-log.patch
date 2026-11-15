@@ -1,0 +1,12 @@
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index 336c84d..b84043b 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2678,6 +2678,7 @@ scdir_ok:
+ 	}
+ done:
+ 	if (error != 0) {
++		printf("SWEET MAP: failed error=%d files=%u\n", error, files_count);
+ 		shared_region_map_and_slide_cleanup(p, files_count, *sr_file_mappings, shared_region);
+ 		*sr_file_mappings = NULL;
+ 		*shared_region_ptr = NULL;

@@ -1,0 +1,14 @@
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1077,6 +1077,11 @@
+ 	sweet_early_panic(panic_format_str, panic_args);
+ #endif
+ 
++#if defined(SWEET)
++	extern void sweet_log_flush_now(void);
++	sweet_log_flush_now();
++#endif
++
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif

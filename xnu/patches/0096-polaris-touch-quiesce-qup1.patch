@@ -1,0 +1,54 @@
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -40,6 +40,7 @@
+ extern int sweet_rpmh_vreg_enable(const char *res, unsigned mv);
+ void sweet_touch_init(void);
+ 
++#define TOUCH_GCC_PA       0x00100000u  /* GCC: QUPv3 wrapper-1 BCR at 0x18000 */
+ #define TOUCH_GPIO_NORTH   0x03900000u  /* TLMM NORTH: pins 33/34/99/125 */
+ #define TOUCH_GPIO_SOUTH   0x03d00000u  /* TLMM SOUTH: pin 23 (tp_vddio) */
+ #define TOUCH_GPIO_VDDIO   23u          /* tp_vddio_vreg, active high */
+@@ -69,7 +70,7 @@
+ };
+ 
+ static struct {
+-	vm_offset_t gpio_n, gpio_s;
++	vm_offset_t gcc, gpio_n, gpio_s;
+ 	bool started, dead;
+ 	unsigned scl, sda, swap;
+ 	uint32_t active;
+@@ -594,9 +595,10 @@
+ 	printf("SWEET TOUCH: starting in %u s (bit-banged I2C)\n", delay_s);
+ 	touch_wait(delay_s * 1000u);
+ 	printf("SWEET TOUCH: mapping TLMM\n");
++	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+ 	st.gpio_n = ml_io_map(TOUCH_GPIO_NORTH, 0x80000);
+ 	st.gpio_s = ml_io_map(TOUCH_GPIO_SOUTH, 0x20000);
+-	if (!st.gpio_n || !st.gpio_s) {
++	if (!st.gcc || !st.gpio_n || !st.gpio_s) {
+ 		printf("SWEET TOUCH: MMIO mapping failed\n");
+ 		goto out;
+ 	}
+@@ -626,9 +628,18 @@
+ 	printf("SWEET TOUCH: reset high\n");
+ 	touch_gpio(st.gpio_n, TOUCH_GPIO_RESET, 0, 3, 7, true, true);
+ 	touch_wait(200);
+-	/* IRQ is only an input here; polling drives reports. */
+-	printf("SWEET TOUCH: irq input\n");
+-	touch_gpio(st.gpio_n, TOUCH_GPIO_IRQ, 0, 3, 7, false, false);
++	/*
++	 * XBL leaves SE14 in GSI mode. Taking its pads as GPIO while the QUP
++	 * wrapper is still live faults the interconnect, so reset wrapper 1
++	 * (GCC_QUPV3_WRAPPER_1_BCR, bit 0) first. The console UART and every
++	 * other iOS device are on wrapper 0 or outside QUPv3.
++	 */
++	printf("SWEET TOUCH: qup1 reset\n");
++	touch_wr(st.gcc, 0x18000, 1);
++	delay(10);
++	touch_wr(st.gcc, 0x18000, 0);
++	delay(10);
++	touch_wait(50);
+ 	printf("SWEET TOUCH: probing (mux 33/34 to gpio)\n");
+ 
+ 	if (rmi_probe() || rmi_scan_pdt()) {

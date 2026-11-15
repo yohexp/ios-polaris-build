@@ -1,0 +1,18 @@
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2898,6 +2898,7 @@
+ 
+ 	files_count = uap->files_count;
+ 	mappings_count = uap->mappings_count;
++	printf("SWEET MAP2: files=%u mappings=%u\n", files_count, mappings_count);
+ 
+ 	if (files_count == 0) {
+ 		SHARED_REGION_TRACE_INFO(
+@@ -3003,6 +3004,7 @@
+ 
+ 	kr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);
+ done:
++	printf("SWEET MAP2: kr=%d\n", kr);
+ 	kfree_data(shared_files, files_count * sizeof(shared_files[0]));
+ 	kfree_data(mappings, mappings_count * sizeof(mappings[0]));
+ 	return kr;

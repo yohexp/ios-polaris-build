@@ -1,0 +1,15 @@
+diff --git a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
+index 43b1ea6..9a7dbdf 100644
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -368,6 +368,10 @@ cs_process_global_enforcement(void)
+ int
+ cs_system_enforcement(void)
+ {
++#if defined(SWEET)
++	/* No Apple AMFI/trust cache on this port; the root is unsealed. */
++	return 0;
++#endif
+ 	return cs_system_enforcement_enable ? 1 : 0;
+ }
+ 

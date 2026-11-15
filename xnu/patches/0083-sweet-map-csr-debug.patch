@@ -1,0 +1,23 @@
+diff --git a/bsd/vm/vm_unix.c b/bsd/vm/vm_unix.c
+index 336c84d..d231ebf 100644
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2505,6 +2505,10 @@ after_root_check:
+ 
+ #if CONFIG_CSR
+ 		if (csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) {
++			csr_config_t sweet_cfg = 0;
++			csr_get_active_config(&sweet_cfg);
++			printf("SWEET MAP: csr_check(RESTRICTED_FS) != 0, active csr=0x%x vp=%p\n",
++			    sweet_cfg, (void *)srfmp->vp);
+ 			VATTR_INIT(&va);
+ 			VATTR_WANTED(&va, va_flags);
+ 			error = vnode_getattr(srfmp->vp, &va, vfs_context_current());
+@@ -2522,6 +2526,7 @@ after_root_check:
+ 			}
+ 
+ 			if (!(va.va_flags & SF_RESTRICTED)) {
++				printf("SWEET MAP: vnode flags=0x%x not SF_RESTRICTED\n", va.va_flags);
+ 				/*
+ 				 * CSR is not configured in CSR_ALLOW_UNRESTRICTED_FS mode, and
+ 				 * the shared cache file is NOT SIP-protected, so reject the

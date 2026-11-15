@@ -1,0 +1,250 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -109,6 +109,7 @@
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_rpmh.c			standard
++bsd/dev/sweet_gpu_probe.c		standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
+ bsd/dev/mem.c				standard
+diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
+new file mode 100644
+index 0000000..07a6810
+--- /dev/null
++++ b/bsd/dev/sweet_gpu_probe.c
+@@ -0,0 +1,214 @@
++/*
++ * Adreno 630 (SDM845, polaris) bring-up probe.  Opt-in: sweetgpuprobe=1.
++ *
++ * This is the first, deliberately small step before the full a6xx driver:
++ * it powers only the GPU CX side and reads the GMU/SMMU, with a 1.2 s sleep
++ * after every stage so the persistent log has the last completed step if a
++ * bus access to an unclocked block hangs the SoC.
++ *
++ * Sequence (flame shim/gpuprobe.c, adapted to gpucc-sdm845/gcc-sdm845):
++ *   GCC gpu_cfg_ahb 0x71004, ddrss_gpu_axi 0x44038, gpu_memnoc_gfx 0x7100c,
++ *       gpu_snoc_dvm_gfx 0x71018
++ *   GPUCC CX GDSC (0x106c) on, gmu_clk_src (0x1120) = XO/1, AHB 0x1078,
++ *       CXO 0x109c, CX_GMU 0x1098
++ *   GMU registers are addressed like the vendor driver: gpu_base + 4*offset,
++ *       which is gmu_base + ((offset - (gmu_base-gpu_base)/4) << 2).
++ *   Reads GMU firmware/init/RPMh state, an ITCM/DTCM write test, SMMU IDR0.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/errno.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++
++void sweet_gpu_probe_init(void);
++
++#define GCC_PA      0x00100000u
++#define GPUCC_PA    0x05090000u
++#define GPU_PA      0x05000000u
++#define GMU_PA      0x0506a000u
++#define SMMU_PA     0x05040000u
++#define GMU2GPU_DW  ((GMU_PA - GPU_PA) >> 2)    /* 0x1a800 */
++
++#define GCC_GPU_CFG_AHB     0x71004u
++#define GCC_DDRSS_GPU_AXI   0x44038u
++#define GCC_GPU_MEMNOC_GFX  0x7100cu
++#define GCC_GPU_SNOC_DVM    0x71018u
++
++#define GPUCC_CX_GDSCR      0x106cu
++#define GPUCC_GX_GDSCR      0x100cu
++#define GPUCC_GMU_RCG       0x1120u
++#define GPUCC_AHB           0x107cu   /* gpu_cc_crc_ahb_clk (sdm845; sm8150 0x1078) */
++#define GPUCC_CX_APB        0x1088u
++#define GPUCC_CXO           0x109cu
++#define GPUCC_CX_GMU        0x1098u
++
++#define GMU_ITCM            0x1b400u
++#define GMU_DTCM            0x1c400u
++#define GMU_FW_VERSION      0x1d3f8u
++#define GMU_INIT_RESULT     0x1f81cu
++#define GMU_RPMH_STATE      0x1f8ecu
++#define GMU_GENERAL_7       0x1f9ccu
++#define GMU_CX_BUSY         0x23b0cu
++
++static vm_offset_t p_gcc, p_gpucc, p_gpu, p_gmu, p_smmu;
++static int probe_chan;
++
++static uint32_t
++prd(vm_offset_t base, uint32_t off)
++{
++	uint32_t v = *(volatile uint32_t *)(base + off);
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++pwr(vm_offset_t base, uint32_t off, uint32_t val)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)(base + off) = val;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++/* GMU offset is a GPU-base dword index; convert to the GMU block. */
++static uint32_t
++gmurd(uint32_t off)
++{
++	return prd(p_gmu, (off - GMU2GPU_DW) << 2);
++}
++
++static void
++gmuwr(uint32_t off, uint32_t val)
++{
++	pwr(p_gmu, (off - GMU2GPU_DW) << 2, val);
++}
++
++static void
++probe_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&probe_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static int
++wait_bit(vm_offset_t base, uint32_t off, uint32_t mask, int set, unsigned ms)
++{
++	for (unsigned i = 0; i <= ms; ++i) {
++		if (!!(prd(base, off) & mask) == set) {
++			return 0;
++		}
++		probe_wait(1);
++	}
++	return -1;
++}
++
++static void
++branch_on(const char *name, vm_offset_t base, uint32_t off)
++{
++	pwr(base, off, prd(base, off) | 1u);
++	int rc = wait_bit(base, off, 1u << 31, 0, 50);
++	printf("SWEET GPU: %s %#x%s\n", name, prd(base, off),
++	    rc ? " (still halted)" : "");
++}
++
++static void
++gpu_probe_thread(void *arg, wait_result_t wr)
++{
++	unsigned delay_s = 30;
++	(void)arg;
++	(void)wr;
++	(void)PE_parse_boot_argn("sweetgpudelay", &delay_s, sizeof(delay_s));
++	printf("SWEET GPU: probe in %u s (a630, SDM845)\n", delay_s);
++	probe_wait(delay_s * 1000u);
++
++	p_gcc = ml_io_map(GCC_PA, 0x80000);
++	p_gpucc = ml_io_map(GPUCC_PA, 0x2000);
++	p_gpu = ml_io_map(GPU_PA, 0x40000);
++	p_gmu = ml_io_map(GMU_PA, 0x30000);
++	p_smmu = ml_io_map(SMMU_PA, 0x20000);
++	if (!p_gcc || !p_gpucc || !p_gpu || !p_gmu || !p_smmu) {
++		printf("SWEET GPU: MMIO mapping failed\n");
++		goto out;
++	}
++
++	printf("SWEET GPU: gpucc cx=%#x gx=%#x gmu_rcg=%#x/%#x ahb=%#x cxo=%#x cx_gmu=%#x\n",
++	    prd(p_gpucc, GPUCC_CX_GDSCR), prd(p_gpucc, GPUCC_GX_GDSCR),
++	    prd(p_gpucc, GPUCC_GMU_RCG), prd(p_gpucc, GPUCC_GMU_RCG + 4),
++	    prd(p_gpucc, GPUCC_AHB), prd(p_gpucc, GPUCC_CXO),
++	    prd(p_gpucc, GPUCC_CX_GMU));
++	printf("SWEET GPU: gcc cfg_ahb=%#x axi=%#x memnoc=%#x snoc=%#x\n",
++	    prd(p_gcc, GCC_GPU_CFG_AHB), prd(p_gcc, GCC_DDRSS_GPU_AXI),
++	    prd(p_gcc, GCC_GPU_MEMNOC_GFX), prd(p_gcc, GCC_GPU_SNOC_DVM));
++	printf("SWEET GPU: smmu idr0=%#x\n", prd(p_smmu, 0));
++	probe_wait(1200);
++
++	printf("SWEET GPU: gcc branches\n");
++	branch_on("cfg_ahb", p_gcc, GCC_GPU_CFG_AHB);
++	branch_on("ddrss_gpu_axi", p_gcc, GCC_DDRSS_GPU_AXI);
++	branch_on("memnoc_gfx", p_gcc, GCC_GPU_MEMNOC_GFX);
++	branch_on("snoc_dvm_gfx", p_gcc, GCC_GPU_SNOC_DVM);
++	probe_wait(1200);
++
++	printf("SWEET GPU: cx gdsc on\n");
++	pwr(p_gpucc, GPUCC_CX_GDSCR, prd(p_gpucc, GPUCC_CX_GDSCR) & ~1u);
++	int rc = wait_bit(p_gpucc, GPUCC_CX_GDSCR, 1u << 31, 1, 200);
++	printf("SWEET GPU: cx gdsc -> %#x %s\n", prd(p_gpucc, GPUCC_CX_GDSCR),
++	    rc ? "TIMEOUT" : "on");
++	probe_wait(1200);
++
++	printf("SWEET GPU: gmu rcg XO/1\n");
++	pwr(p_gpucc, GPUCC_GMU_RCG + 4,
++	    (prd(p_gpucc, GPUCC_GMU_RCG + 4) & ~0x71fu) | 1u);
++	pwr(p_gpucc, GPUCC_GMU_RCG, prd(p_gpucc, GPUCC_GMU_RCG) | 1u);
++	rc = wait_bit(p_gpucc, GPUCC_GMU_RCG, 1u, 0, 50);
++	printf("SWEET GPU: gmu rcg %#x cfg %#x%s\n", prd(p_gpucc, GPUCC_GMU_RCG),
++	    prd(p_gpucc, GPUCC_GMU_RCG + 4), rc ? " UPDATE TIMEOUT" : "");
++	branch_on("gpucc crc_ahb", p_gpucc, GPUCC_AHB);
++	branch_on("gpucc cx_apb", p_gpucc, GPUCC_CX_APB);
++	branch_on("gpucc cxo", p_gpucc, GPUCC_CXO);
++	branch_on("gpucc cx_gmu", p_gpucc, GPUCC_CX_GMU);
++	probe_wait(1200);
++
++	printf("SWEET GPU: gmu fw=%#x init=%#x rpmh=%#x gen7=%#x busy=%#x\n",
++	    gmurd(GMU_FW_VERSION), gmurd(GMU_INIT_RESULT), gmurd(GMU_RPMH_STATE),
++	    gmurd(GMU_GENERAL_7), gmurd(GMU_CX_BUSY));
++	probe_wait(1200);
++
++	uint32_t itcm0 = gmurd(GMU_ITCM), dtcm0 = gmurd(GMU_DTCM);
++	gmuwr(GMU_ITCM, 0x464c414d);
++	gmuwr(GMU_DTCM, 0x45475055);
++	printf("SWEET GPU: itcm %#x -> %#x, dtcm %#x -> %#x (want 464c414d 45475055)\n",
++	    itcm0, gmurd(GMU_ITCM), dtcm0, gmurd(GMU_DTCM));
++	printf("SWEET GPU: probe done\n");
++
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++sweet_gpu_probe_init(void)
++{
++	int on = 0;
++	thread_t thread;
++	(void)PE_parse_boot_argn("sweetgpuprobe", &on, sizeof(on));
++	if (!on) {
++		return;
++	}
++	printf("SWEET GPU: probe enabled\n");
++	if (kernel_thread_start(gpu_probe_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("SWEET GPU: thread start failed\n");
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -50,6 +50,7 @@
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern void sweet_gpu_probe_init(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -602,6 +603,7 @@
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
+ 	sweet_sample_start();
++	sweet_gpu_probe_init();   /* Adreno 630 probe (sweetgpuprobe=1) */
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	sweet_keys_init();
+ 	sweet_touch_init();
