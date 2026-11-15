@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..ff9621b
+index 0000000..ee4d029
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1495 @@
+@@ -0,0 +1,1457 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1129,82 +1129,44 @@ index 0000000..ff9621b
 +#define PAS_GPU		13
 +#define ZAP_REGION	0x8c415000ull	/* reserved-memory gpu_region on polaris */
 +#define ZAP_SIZE	0x2000u
-+#define SCM_SVC_PIL	2u
-+#define ZAP_CMD_OFF	0xa0000ull	/* pool: legacy scm_command buffer */
++#define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
 +
-+/*
-+ * Legacy Qualcomm SCM: the a630 (SDM845) TZ accepts one SMC with x0 = the
-+ * physical address of a scm_command buffer {len, buf_offset, resp_hdr_offset,
-+ * id, args...}. The TZ writes a scm_response {len, buf_offset, is_complete}
-+ * at resp_hdr_offset followed by the response payload. The a640 (SM8150)
-+ * used the ARMv8 scm_call2 form; here it returns r1 0x82.
-+ */
-+static int64_t scm_legacy(struct a6_gpu *g, uint32_t cmd, const void *req,
-+    uint32_t req_len, uint32_t *ret)
++static int64_t scm(uint32_t cmd, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *r1)
 +{
-+	uint64_t pa = a6_pool_pa(g, ZAP_CMD_OFF);
-+	uint32_t total = 16u + req_len + 12u + 4u;
-+	uint8_t buf[16 + 16 + 12 + 4];
-+	memset(buf, 0, sizeof(buf));
-+	*(uint32_t *)(buf + 0) = total;
-+	*(uint32_t *)(buf + 4) = 16;
-+	*(uint32_t *)(buf + 8) = 16u + req_len;
-+	*(uint32_t *)(buf + 12) = (SCM_SVC_PIL << 10) | cmd;
-+	memcpy(buf + 16, req, req_len);
-+	a6_write(pa, buf, total);
-+	uint64_t x[8] = { pa, 0, 0, 0, 0, 0, 0, 0 };
++	uint64_t x[8] = { SCM_PIL(cmd), arginfo, a, b, c, 0, 0, 0 };
 +	a6_smc(x);
-+	int64_t rc = (int64_t)x[0];
-+	if (rc)
-+		return rc;
-+	uint8_t rsp[32];
-+	uint32_t roff = 0, done = 0;
-+	for (int i = 0; i < 100; i++) {
-+		a6_read(pa + 16u + req_len, rsp, sizeof(rsp));
-+		roff = *(uint32_t *)(rsp + 4);
-+		done = *(uint32_t *)(rsp + 8);
-+		if (done)
-+			break;
-+		a6_delay_ms(1);
-+	}
-+	if (ret) {
-+		if (roff >= 12 && roff + 4 <= sizeof(rsp))
-+			*ret = *(uint32_t *)(rsp + roff);
-+		else
-+			*ret = 0;
-+	}
-+	return done ? 0 : -2;
++	if (r1)
++		*r1 = x[1];
++	return (int64_t)x[0];
 +}
 +
 +static int zap_load(struct a6_gpu *g)
 +{
-+	uint32_t ret = 0, mlen, slen;
++	uint64_t r1 = 0;
++	uint32_t mlen, slen;
 +	const uint8_t *mdt = a6_firmware("a630_zap.mdt", &mlen), *b02 = a6_firmware("a630_zap.b02", &slen);
 +	if (!mdt || !b02 || slen > ZAP_SIZE) {
 +		a6_log("zap: missing a630_zap.mdt/.b02\n");
 +		return -1;
 +	}
-+	a6_write(ZAP_REGION, mdt, mlen);	/* metadata in the PAS region */
-+	struct { uint32_t proc, image; } init = { PAS_GPU, (uint32_t)ZAP_REGION };
-+	int64_t rc = scm_legacy(g, 1, &init, sizeof(init), &ret);
-+	if (rc || ret) {
-+		a6_log("zap: init image rc %lld ret %x\n", (long long)rc, ret);
++	a6_write(ZAP_REGION, mdt, mlen);	/* vendor PIL: metadata lives in the PAS region */
++	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, ZAP_REGION, 0, &r1);
++	if (rc || r1) {
++		a6_log("zap: init image rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +		return -1;
 +	}
-+	struct { uint32_t proc, addr, len; } mem = { PAS_GPU, (uint32_t)ZAP_REGION, ZAP_SIZE };
-+	rc = scm_legacy(g, 2, &mem, sizeof(mem), &ret);
-+	if (rc || ret) {
-+		a6_log("zap: mem setup rc %lld ret %x\n", (long long)rc, ret);
++	rc = scm(2, 3, PAS_GPU, ZAP_REGION, ZAP_SIZE, &r1);
++	if (rc || r1) {
++		a6_log("zap: mem setup rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +		return -1;
 +	}
 +	static uint8_t seg[ZAP_SIZE];
 +	memset(seg, 0, sizeof(seg));
 +	memcpy(seg, b02, slen);
 +	a6_write(ZAP_REGION, seg, ZAP_SIZE);
-+	uint32_t auth = PAS_GPU;
-+	rc = scm_legacy(g, 5, &auth, sizeof(auth), &ret);
-+	a6_log("zap: auth and reset rc %lld ret %x\n", (long long)rc, ret);
-+	return rc || ret ? -1 : 0;
++	rc = scm(5, 1, PAS_GPU, 0, 0, &r1);
++	a6_log("zap: auth and reset rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
++	return rc || r1 ? -1 : 0;
 +}
 +
 +/* ---- ring ---- */
