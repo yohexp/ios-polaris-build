@@ -48,7 +48,7 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..b0982a2
+index 0000000..048c156
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
 @@ -0,0 +1,1461 @@
@@ -476,7 +476,7 @@ index 0000000..b0982a2
 +	uint32_t want = (1u << 31) | sid;
 +	/* SMR0 is the bootloader mask-probe scratch and does not accept writes
 +	 * on polaris; use only the real groups 1..4. */
-+	for (int i = 1; i <= 7; i++) {
++	for (int i = 1; i <= 4; i++) {
 +		if (rd32(SMR(i)) >> 31)
 +			continue;
 +		wr32(S2CR(i), (3u << 24) | (uint32_t)cb);
