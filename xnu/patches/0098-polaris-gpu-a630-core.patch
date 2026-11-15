@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..048c156
+index 0000000..1b4bcaf
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1461 @@
+@@ -0,0 +1,1481 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1140,6 +1140,18 @@ index 0000000..048c156
 +	return (int64_t)x[0];
 +}
 +
++/* Generic ARMv8 SCM call2 (used for the TZ CP SMMU aperture programming). */
++static int64_t scm2(uint32_t svc, uint32_t cmd, uint32_t arginfo, uint64_t a,
++    uint64_t b, uint64_t c, uint64_t d, uint64_t *r1)
++{
++	uint64_t x[8] = { 0x42000000ull | ((uint64_t)svc << 8) | cmd,
++	    arginfo, a, b, c, d, 0, 0 };
++	a6_smc(x);
++	if (r1)
++		*r1 = x[1];
++	return (int64_t)x[0];
++}
++
 +static int zap_load(struct a6_gpu *g)
 +{
 +	uint64_t r1 = 0;
@@ -1416,6 +1428,14 @@ index 0000000..048c156
 +	}
 +	map_gpu_low(g);
 +	smmu_bank(g->gpu_smr, g->gpu_cb, a6_pool_pa(g, A6_OFF_GT_L1), GPU_SID, GPU_SID_MASK);
++	{
++		uint64_t ar1 = 0;
++		uint32_t ap = 0xFFFF0000u | (uint32_t)g->gpu_cb;	/* CP_APERTURE_REG 0 */
++		int64_t arc = scm2(0xC, 0x1B, 4, ap, 0xFFFFFFFFu, 0xFFFFFFFFu,
++		    0xFFFFFFFFu, &ar1);
++		a6_log("smmu: cp aperture cb%d rc %lld r1 %llx\n", g->gpu_cb,
++		    (long long)arc, (unsigned long long)ar1);
++	}
 +	smmu_alias(g->gpu_cb, 2);	/* gfx3d user stream */
 +	smmu_alias(g->gpu_cb, 1);	/* gfx3d secure stream (if writable) */
 +	smmu_alias(g->gpu_cb, 0x400);
