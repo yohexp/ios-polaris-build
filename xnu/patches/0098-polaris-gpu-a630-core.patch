@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..38dd597
+index 0000000..b0982a2
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1459 @@
+@@ -0,0 +1,1461 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -168,7 +168,7 @@ index 0000000..38dd597
 +#define GMU_SID		5
 +#define GMU_SID_MASK	0
 +#define GPU_SID		0
-+#define GPU_SID_MASK	2	/* match the gfx3d user SID 2 as well as 0 */
++#define GPU_SID_MASK	0
 +
 +#define GMEM_L1(g)	a6_pool_pa(g, 0x0000)
 +#define GMEM_L2_0(g)	a6_pool_pa(g, 0x1000)
@@ -476,7 +476,7 @@ index 0000000..38dd597
 +	uint32_t want = (1u << 31) | sid;
 +	/* SMR0 is the bootloader mask-probe scratch and does not accept writes
 +	 * on polaris; use only the real groups 1..4. */
-+	for (int i = 1; i <= 4; i++) {
++	for (int i = 1; i <= 7; i++) {
 +		if (rd32(SMR(i)) >> 31)
 +			continue;
 +		wr32(S2CR(i), (3u << 24) | (uint32_t)cb);
@@ -1416,6 +1416,8 @@ index 0000000..38dd597
 +	}
 +	map_gpu_low(g);
 +	smmu_bank(g->gpu_smr, g->gpu_cb, a6_pool_pa(g, A6_OFF_GT_L1), GPU_SID, GPU_SID_MASK);
++	smmu_alias(g->gpu_cb, 2);	/* gfx3d user stream */
++	smmu_alias(g->gpu_cb, 1);	/* gfx3d secure stream (if writable) */
 +	smmu_alias(g->gpu_cb, 0x400);
 +	STAGE_OK(5, "gpu smmu");
 +
