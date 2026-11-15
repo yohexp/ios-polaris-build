@@ -48,7 +48,7 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..adc3af3
+index 0000000..ee4d029
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
 @@ -0,0 +1,1457 @@
@@ -1149,8 +1149,8 @@ index 0000000..adc3af3
 +		a6_log("zap: missing a630_zap.mdt/.b02\n");
 +		return -1;
 +	}
-+	a6_write(a6_pool_pa(g, A6_OFF_ZAP_META), mdt, mlen);
-+	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, a6_pool_pa(g, A6_OFF_ZAP_META), 0, &r1);
++	a6_write(ZAP_REGION, mdt, mlen);	/* vendor PIL: metadata lives in the PAS region */
++	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, ZAP_REGION, 0, &r1);
 +	if (rc || r1) {
 +		a6_log("zap: init image rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +		return -1;
