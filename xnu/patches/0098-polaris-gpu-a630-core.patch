@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..06a1cb0
+index 0000000..36eb816
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1481 @@
+@@ -0,0 +1,1479 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -168,7 +168,7 @@ index 0000000..06a1cb0
 +#define GMU_SID		5
 +#define GMU_SID_MASK	0
 +#define GPU_SID		0
-+#define GPU_SID_MASK	2	/* SID 0 and gfx3d user SID 2 */
++#define GPU_SID_MASK	0
 +
 +#define GMEM_L1(g)	a6_pool_pa(g, 0x0000)
 +#define GMEM_L2_0(g)	a6_pool_pa(g, 0x1000)
@@ -1436,9 +1436,7 @@ index 0000000..06a1cb0
 +		a6_log("smmu: cp aperture cb%d rc %lld r1 %llx\n", g->gpu_cb,
 +		    (long long)arc, (unsigned long long)ar1);
 +	}
-+	smmu_alias(g->gpu_cb, 2);	/* gfx3d user stream */
-+	smmu_alias(g->gpu_cb, 1);	/* gfx3d secure stream (if writable) */
-+	smmu_alias(g->gpu_cb, 0x400);
++	smmu_alias(g->gpu_cb, 2);	/* gfx3d user stream, exact SMR (SID 0 is the CP ring) */
 +	STAGE_OK(5, "gpu smmu");
 +
 +	/* Hold the GX rail on while we program the core. */
