@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..e93669b
+index 0000000..202e428
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1795 @@
+@@ -0,0 +1,1797 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1804,6 +1804,8 @@ index 0000000..e93669b
 +		(void)a6_blit_test(g);		/* validation only */
 +	(void)sweet_gpu_panel_probe();
 +	sweet_gpu_mem_probe();
++	if (!rc && a6_v2)
++		(void)sweet_gpu_v2_test();
 +	int running = a6_cp_running(g);
 +
 +	/* Done touching the GPU: let the GMU power manage it. */
@@ -1849,10 +1851,10 @@ index 0000000..e93669b
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..6871534
+index 0000000..3151052
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,173 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1959,12 +1961,15 @@ index 0000000..6871534
 +extern int a6_gmu_clk_500;
 +extern int a6_paint;		/* sweetgpupaint=1: CP_MEM_WRITE/CP_MEMCPY test */
 +extern int a6_2d;		/* sweetgpu2d=1: 2D blit self-test */
++extern int a6_v2;		/* sweetgpu_v2=1: high-RAM BO self-test */
 +
 +void a6_init_state(struct a6_gpu *g, uint64_t pool_pa);
 +int a6_power_up(struct a6_gpu *g);	/* CX+GMU+HFI+GX+CP; 0 = ok */
 +int a6_selftest(struct a6_gpu *g);	/* ring a CP_MEM_WRITE; 0 = the value landed */
 +int sweet_gpu_panel_probe(void);	/* environment: read-only DPU SSPP probe */
 +void sweet_gpu_mem_probe(void);	/* environment: physmap coverage probe */
++int sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa);
++int sweet_gpu_v2_test(void);
 +
 +/* 2D blit engine (RB_A2D/GRAS_A2D/TPL1_A2D), after turnip's r2d path. */
 +struct a6_blit {
@@ -2025,10 +2030,10 @@ index 0000000..6871534
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..6a80e32
+index 0000000..3a939da
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,519 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2063,6 +2068,7 @@ index 0000000..6a80e32
 +extern boolean_t pmap_valid_address(uint64_t pa);
 +extern vm_map_address_t phystokv(uint64_t pa);
 +extern vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
++extern void ml_io_unmap(vm_offset_t addr, vm_size_t size);
 +extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 +extern void thread_deallocate(thread_t);
 +extern kern_return_t thread_terminate(thread_t);
@@ -2092,6 +2098,7 @@ index 0000000..6a80e32
 +int a6_gmu_clk_500 = 0;
 +int a6_paint = 0;
 +int a6_2d = 0;
++int a6_v2 = 0;
 +static LCK_GRP_DECLARE(sweet_gpu_grp, "sweet_gpu");
 +static LCK_MTX_DECLARE(sweet_gpu_lock, &sweet_gpu_grp);
 +
@@ -2302,6 +2309,7 @@ index 0000000..6a80e32
 +	(void)PE_parse_boot_argn("sweetgpugmuclk", &a6_gmu_clk_500, sizeof(a6_gmu_clk_500));
 +	(void)PE_parse_boot_argn("sweetgpupaint", &a6_paint, sizeof(a6_paint));
 +	(void)PE_parse_boot_argn("sweetgpu2d", &a6_2d, sizeof(a6_2d));
++	(void)PE_parse_boot_argn("sweetgpu_v2", &a6_v2, sizeof(a6_v2));
 +	vm_offset_t va = 0;
 +	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
@@ -2370,6 +2378,71 @@ index 0000000..6a80e32
 +	}
 +	a6_log("panel probe: active sspp %d\n", hit);
 +	return hit;
++}
++
++/* ---- v2 buffer pool (RAM XNU does not map) and self-test ---- */
++
++/* ADT dram-size is 1.23 GB from 0xb0000000 (XNU's physmap); the DT's second
++ * memory region at 5 GB (0x140000000, 3 GB) is general DRAM outside it.  Use
++ * the first 512 MB for write-combined GPU buffers (no physmap alias). */
++#define GPOOL_BASE	0x140000000ull
++#define GPOOL_LIMIT	0x160000000ull
++static uint64_t gpool_next = GPOOL_BASE;
++
++int
++sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa)
++{
++	uint64_t size = (bytes + 0x3fffull) & ~0x3fffull;
++	if (size == 0 || gpool_next + size > GPOOL_LIMIT) {
++		return -1;
++	}
++	*pa = gpool_next;
++	gpool_next += size;
++	return 0;
++}
++
++/* Allocate a BO above 4 GB, write an IB into it through an uncached I/O map,
++ * map it at a 4 GB GPU window and submit.  Proves the v2 memory model. */
++int
++sweet_gpu_v2_test(void)
++{
++	uint64_t bo_pa = 0, iova = 0x1000000000ull;
++	if (sweet_gpu_pool_alloc(0x10000, &bo_pa)) {
++		a6_log("v2: pool exhausted\n");
++		return -1;
++	}
++	vm_offset_t bo_va = ml_io_map_unmappable((vm_offset_t)bo_pa, 0x10000, VM_WIMG_IO);
++	if (!bo_va) {
++		a6_log("v2: no I/O map for %llx\n", (unsigned long long)bo_pa);
++		return -1;
++	}
++	volatile uint32_t *bo = (volatile uint32_t *)bo_va;
++	for (unsigned i = 0; i < 0x10000 / 4; i++) {
++		bo[i] = 0xdeadbeef;
++	}
++	uint32_t *dw = (uint32_t *)bo;
++	uint64_t tva = a6_pool_va(A6_OFF_SCRATCH + 0x200);
++	uint32_t n = 0;
++	dw[n++] = a6_pkt7(A6_CP_MEM_WRITE, 3);
++	dw[n++] = (uint32_t)tva;
++	dw[n++] = (uint32_t)(tva >> 32);
++	dw[n++] = 0xcafef00d;
++	dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	uint64_t pages[4] = { bo_pa, bo_pa + 0x4000, bo_pa + 0x8000, bo_pa + 0xc000 };
++	lck_mtx_lock(&sweet_gpu_lock);
++	int rc = a6_map_pages(&gpu, iova, pages, 4, 0x4000);
++	a6_tlb_flush(&gpu);
++	if (!rc) {
++		rc = a6_submit_ib(&gpu, iova, n, 1000);
++	}
++	lck_mtx_unlock(&sweet_gpu_lock);
++	uint32_t got = 0;
++	a6_read(a6_pool_pa(&gpu, A6_OFF_SCRATCH + 0x200), &got, 4);
++	a6_log("v2: bo %llx iova %llx submit %d mem %x %s\n", (unsigned long long)bo_pa,
++	       (unsigned long long)iova, rc, got, got == 0xcafef00d ? "ok" : "FAILED");
++	ml_io_unmap(bo_va, 0x10000);
++	return rc || got != 0xcafef00d ? -1 : 0;
 +}
 +
 +/* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
