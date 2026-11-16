@@ -1848,7 +1848,7 @@ index 0000000..24c9e60
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..6b13966
+index 0000000..f75f3dd
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
 @@ -0,0 +1,169 @@
@@ -1968,8 +1968,8 @@ index 0000000..6b13966
 +struct a6_blit {
 +	uint64_t src_iova;
 +	uint32_t src_w, src_h, src_pitch;
-+	uint32_t sw, sh;		/* source crop */
-+	uint32_t dst_iova;
++	uint32_t sx, sy, sw, sh;	/* source rectangle */
++	uint64_t dst_iova;
 +	uint32_t dst_pitch;		/* 64-byte units in the register */
 +	uint32_t dx, dy, dw, dh;
 +	bool filter;			/* bilinear */
