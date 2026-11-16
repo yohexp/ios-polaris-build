@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..24c9e60
+index 0000000..e93669b
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1794 @@
+@@ -0,0 +1,1795 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1803,6 +1803,7 @@ index 0000000..24c9e60
 +	if (!rc && a6_2d)
 +		(void)a6_blit_test(g);		/* validation only */
 +	(void)sweet_gpu_panel_probe();
++	sweet_gpu_mem_probe();
 +	int running = a6_cp_running(g);
 +
 +	/* Done touching the GPU: let the GMU power manage it. */
@@ -1848,10 +1849,10 @@ index 0000000..24c9e60
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..f75f3dd
+index 0000000..6871534
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,170 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1963,6 +1964,7 @@ index 0000000..f75f3dd
 +int a6_power_up(struct a6_gpu *g);	/* CX+GMU+HFI+GX+CP; 0 = ok */
 +int a6_selftest(struct a6_gpu *g);	/* ring a CP_MEM_WRITE; 0 = the value landed */
 +int sweet_gpu_panel_probe(void);	/* environment: read-only DPU SSPP probe */
++void sweet_gpu_mem_probe(void);	/* environment: physmap coverage probe */
 +
 +/* 2D blit engine (RB_A2D/GRAS_A2D/TPL1_A2D), after turnip's r2d path. */
 +struct a6_blit {
@@ -2023,10 +2025,10 @@ index 0000000..f75f3dd
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..41f3006
+index 0000000..6a80e32
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,451 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2325,6 +2327,24 @@ index 0000000..41f3006
 +sweet_gpu_pool_pa(void)
 +{
 +	return gpu.pool_pa;
++}
++
++/* Read-only: which physical ranges are outside XNU's physmap (candidates for
++ * the v2 write-combined buffer pool). */
++void
++sweet_gpu_mem_probe(void)
++{
++	static const uint64_t pa[] = {
++		0x80000000ull, 0x8ab00000ull, 0x8c500000ull, 0x8e400000ull,
++		0x95c00000ull, 0x96100000ull, 0x96900000ull, 0x96b00000ull,
++		0x9d400000ull, 0xaf000000ull, 0xb0000000ull, 0xc0000000ull,
++		0xc4000000ull, 0xe0000000ull, 0xe1000000ull, 0xf0000000ull,
++		0x100000000ull, 0x140000000ull, 0x180000000ull,
++	};
++	for (unsigned i = 0; i < sizeof(pa) / sizeof(pa[0]); i++) {
++		a6_log("mem: %llx physmap %d\n", (unsigned long long)pa[i],
++		       pmap_valid_address(pa[i]));
++	}
 +}
 +
 +/* Read-only probe of the SDE/DPU SSPP source address and row stride (panel
