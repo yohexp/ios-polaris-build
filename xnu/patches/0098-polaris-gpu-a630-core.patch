@@ -1862,10 +1862,10 @@ index 0000000..11001a8
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..a5f1c0b
+index 0000000..07327fc
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,405 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2253,12 +2253,19 @@ index 0000000..a5f1c0b
 +	uint64_t t2 = mach_absolute_time();
 +	stat_clean += t1 - t0;
 +	stat_copy += t2 - t1;
-+	if ((++stat_present % 300) == 0) {
++	uint64_t cn, gn;
++	absolutetime_to_nanoseconds(t1 - t0, &cn);
++	absolutetime_to_nanoseconds(t2 - t1, &gn);
++	if (stat_present <= 8) {
++		a6_log("present: frame %llu clean %llu us copy %llu us\n", stat_present,
++		    cn / 1000, gn / 1000);
++	}
++	if ((stat_present % 20) == 0) {
 +		uint64_t c, g;
 +		absolutetime_to_nanoseconds(stat_clean, &c);
 +		absolutetime_to_nanoseconds(stat_copy, &g);
 +		a6_log("present: %llu frames, avg clean %llu us, GPU copy %llu us\n", stat_present,
-+		    c / 1000 / 300, g / 1000 / 300);
++		    c / 1000 / 20, g / 1000 / 20);
 +		stat_clean = stat_copy = 0;
 +	}
 +	return rc;
