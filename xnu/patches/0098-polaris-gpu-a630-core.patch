@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..d0c622d
+index 0000000..3232012
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1542 @@
+@@ -0,0 +1,1545 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -75,6 +75,9 @@ index 0000000..d0c622d
 +#include <string.h>
 +#endif
 +#include "sweet_a6xx.h"
++
++extern void _disable_preemption(void);
++extern void _enable_preemption(void);
 +
 +#define rd32		a6_rd
 +#define wr32		a6_wr
@@ -1749,10 +1752,10 @@ index 0000000..edab7ef
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..96280c4
+index 0000000..5c4c4ba
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,291 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
