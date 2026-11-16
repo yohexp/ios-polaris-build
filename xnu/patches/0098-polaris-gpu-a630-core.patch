@@ -2030,7 +2030,7 @@ index 0000000..3151052
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..57ee470
+index 0000000..d76aa8b
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
 @@ -0,0 +1,520 @@
@@ -2382,11 +2382,11 @@ index 0000000..57ee470
 +
 +/* ---- v2 buffer pool (RAM XNU does not map) and self-test ---- */
 +
-+/* Reserved no-map DRAM below 4 GB (the DT's ramdump framebuffer region):
-+ * outside XNU's physmap, so the write-combined client mapping has no
-+ * cacheable alias.  16 MB, enough to validate the v2 model. */
-+#define GPOOL_BASE	0xaf000000ull
-+#define GPOOL_LIMIT	0xb0000000ull
++/* Low DRAM that the --highmem ADT leaves outside XNU's physmap (XNU maps
++ * 4 GB..7.95 GB).  It was managed RAM before, so it is known-good and
++ * accessible; no cacheable alias for the write-combined client view. */
++#define GPOOL_BASE	0xb0000000ull
++#define GPOOL_LIMIT	0x100000000ull
 +static uint64_t gpool_next = GPOOL_BASE;
 +
 +int
