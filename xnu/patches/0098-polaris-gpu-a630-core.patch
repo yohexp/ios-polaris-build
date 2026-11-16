@@ -2030,10 +2030,10 @@ index 0000000..3151052
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..d76aa8b
+index 0000000..63e1947
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,523 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2170,7 +2170,7 @@ index 0000000..d76aa8b
 +{
 +	if (in_pool(pa, len)) {
 +		memcpy((void *)(pool_kva + (pa - gpu.pool_pa)), buf, len);
-+		flush_dcache64((addr64_t)pa, (unsigned)len, TRUE);
++		__asm__ volatile ("dsb sy" ::: "memory");	/* uncached mapping: DRAM is current */
 +		return 0;
 +	}
 +	if (pmap_valid_address(pa)) {
@@ -2188,7 +2188,7 @@ index 0000000..d76aa8b
 +a6_read(uint64_t pa, void *buf, size_t len)
 +{
 +	if (in_pool(pa, len)) {
-+		flush_dcache64((addr64_t)pa, (unsigned)len, TRUE);
++		__asm__ volatile ("dsb sy" ::: "memory");
 +		memcpy(buf, (const void *)(pool_kva + (pa - gpu.pool_pa)), len);
 +		return 0;
 +	}
@@ -2310,16 +2310,19 @@ index 0000000..d76aa8b
 +	(void)PE_parse_boot_argn("sweetgpupaint", &a6_paint, sizeof(a6_paint));
 +	(void)PE_parse_boot_argn("sweetgpu2d", &a6_2d, sizeof(a6_2d));
 +	(void)PE_parse_boot_argn("sweetgpu_v2", &a6_v2, sizeof(a6_v2));
-+	vm_offset_t va = 0;
-+	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
-+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		a6_log("no contiguous pool\n");
++	/* The GPU (GMU SMMU output, TBU) only reaches 32-bit physical addresses,
++	 * so the pool must stay below 4 GB.  With the --highmem ADT XNU manages
++	 * 4 GB.., but the low DRAM 0xb0000000..0x100000000 is left unmanaged and
++	 * is known-good: map it uncached and use it for the pool (and the v2 BOs). */
++	uint64_t pool_pa = 0xb0000000ull;
++	vm_offset_t va = ml_io_map_unmappable((vm_offset_t)pool_pa, A6_POOL_SIZE, VM_WIMG_IO);
++	if (!va) {
++		a6_log("no I/O mapping for the GPU pool\n");
 +		return;
 +	}
-+	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
-+	a6_init_state(&gpu, ptoa_64(pn));
++	a6_init_state(&gpu, pool_pa);
 +	pool_kva = va;
-+	flush_dcache64((addr64_t)gpu.pool_pa, (unsigned)A6_POOL_SIZE, TRUE);
++	__asm__ volatile ("dsb sy" ::: "memory");
 +	thread_t thread;
 +	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS)
 +		thread_deallocate(thread);
@@ -2385,7 +2388,7 @@ index 0000000..d76aa8b
 +/* Low DRAM that the --highmem ADT leaves outside XNU's physmap (XNU maps
 + * 4 GB..7.95 GB).  It was managed RAM before, so it is known-good and
 + * accessible; no cacheable alias for the write-combined client view. */
-+#define GPOOL_BASE	0xb0000000ull
++#define GPOOL_BASE	0xb2000000ull
 +#define GPOOL_LIMIT	0x100000000ull
 +static uint64_t gpool_next = GPOOL_BASE;
 +
