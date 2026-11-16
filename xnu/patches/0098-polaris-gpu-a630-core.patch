@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..78a5f1d
+index 0000000..d0c622d
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1541 @@
+@@ -0,0 +1,1542 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -70,6 +70,7 @@ index 0000000..78a5f1d
 +#include <sys/param.h>
 +#include <sys/systm.h>
 +#include <libkern/libkern.h>
++#include <kern/sched_prim.h>
 +#else
 +#include <string.h>
 +#endif
