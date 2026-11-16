@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..077076e
+index 0000000..24c9e60
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1649 @@
+@@ -0,0 +1,1794 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1338,6 +1338,149 @@ index 0000000..077076e
 +	return n;
 +}
 +
++/* ---- 2D blit engine ---- */
++
++/* The state turnip writes before any work (tu6_init_hw + the device's magic
++ * registers), captured on the A640.  The a630 shares the a6xx 2D registers. */
++static const uint32_t blit_init[][2] = {
++	{ 0x9804, 0x1f }, { 0x9805, 1 }, { 0xa0f8, 1 }, { 0xb600, 0x8000 }, { 0x8600, 0 },
++	{ 0xae03, 0x420 }, { 0xae00, 0 }, { 0xbe04, 0 }, { 0x9600, 0x2000000 }, { 0x0e12, 1 },
++	{ 0x8e01, 1 }, { 0x8e04, 0x4100000 }, { 0xae04, 0 }, { 0xae0f, 0x3f }, { 0xb605, 0x44 },
++	{ 0xbe00, 0x80 }, { 0xbe01, 0 }, { 0xab20, 0 }, { 0xb182, 0 }, { 0xbb11, 0 }, { 0xa9a8, 0 },
++	{ 0xab00, 5 }, { 0xa009, 3 }, { 0x8811, 0x10 }, { 0x8110, 0 }, { 0x8818, 0 }, { 0x8819, 0 },
++	{ 0x881a, 0 }, { 0x881b, 0 }, { 0x881c, 0 }, { 0x881d, 0 }, { 0x881e, 0 }, { 0x88f0, 0 },
++	{ 0x9236, 0 }, { 0x9300, 0 }, { 0x9306, 1 }, { 0xb183, 0 }, { 0x80af, 0 }, { 0x8099, 0 },
++	{ 0x980a, 0 }, { 0x9210, 0 }, { 0x9211, 0 }, { 0x9602, 0 }, { 0x9e72, 0 }, { 0xb309, 0xa2 },
++	{ 0xb986, 0xfc }, { 0xa007, 0 }, { 0x8864, 0 }, { 0xb800, 0x102 },
++	{ 0x8e07, 0x10000000 },		/* RB_CCU_CNTL: sysmem, full CCU */
++};
++
++#define EV_CACHE_FLUSH_TS		0x04
++#define EV_PC_CCU_INVALIDATE_COLOR	0x19
++#define EV_PC_CCU_FLUSH_DEPTH_TS	0x1c
++#define EV_PC_CCU_FLUSH_COLOR_TS	0x1d
++#define EV_CACHE_INVALIDATE		0x31
++
++uint32_t
++a6_blit_ib(const struct a6_gpu *g, const struct a6_blit *b, uint32_t *dw)
++{
++	(void)g;
++	uint32_t n = 0;
++	uint64_t border = a6_pool_va(A6_OFF_SCRATCH + 0x800);
++	uint64_t ts = a6_pool_va(A6_OFF_SCRATCH + 0x900);
++#define EV(e)		do { dw[n++] = a6_pkt7(A6_CP_EVENT_WRITE, 1); dw[n++] = (e); } while (0)
++#define EV_TS(e)	do { dw[n++] = a6_pkt7(A6_CP_EVENT_WRITE, 4); dw[n++] = (e); \
++			     dw[n++] = (uint32_t)ts; dw[n++] = (uint32_t)(ts >> 32); dw[n++] = 0; } while (0)
++#define REG(r, v)	do { dw[n++] = a6_pkt4((r), 1); dw[n++] = (v); } while (0)
++	EV(EV_CACHE_INVALIDATE);
++	REG(0xbb08, 0xfffff);		/* SP_UPDATE_CNTL */
++	dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
++	for (unsigned i = 0; i < sizeof(blit_init) / sizeof(blit_init[0]); i++) {
++		REG(blit_init[i][0], blit_init[i][1]);
++	}
++	dw[n++] = a6_pkt4(0xb302, 2);	/* TPL1_GFX_BORDER_COLOR_BASE */
++	dw[n++] = (uint32_t)border;
++	dw[n++] = (uint32_t)(border >> 32);
++	dw[n++] = a6_pkt4(0xb180, 2);	/* TPL1_CS_BORDER_COLOR_BASE */
++	dw[n++] = (uint32_t)border;
++	dw[n++] = (uint32_t)(border >> 32);
++	EV_TS(EV_PC_CCU_FLUSH_COLOR_TS);
++	EV(EV_PC_CCU_INVALIDATE_COLOR);
++	EV(EV_CACHE_INVALIDATE);
++	dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
++
++	REG(0x8c01, 0);			/* RB_A2D_PIXEL_CNTL */
++	REG(0x8c00, 0x00f03000);	/* RB_A2D_BLT_CNTL: 8888 UNORM, mask f */
++	REG(0x8400, 0x00f03000);	/* GRAS_A2D_BLT_CNTL */
++	REG(0xacc0, 0xf180);		/* SP_A2D_OUTPUT_INFO */
++	dw[n++] = a6_pkt4(0x8405, 2);	/* GRAS_A2D_DEST_TL, _BR (inclusive) */
++	dw[n++] = b->dx | (b->dy << 16);
++	dw[n++] = (b->dx + b->dw - 1) | ((b->dy + b->dh - 1) << 16);
++	dw[n++] = a6_pkt4(0x8401, 4);	/* GRAS_A2D_SRC_XMIN..YMAX, 24.8 fixed, inclusive */
++	dw[n++] = b->sx << 8;
++	dw[n++] = (b->sx + b->sw - 1) << 8;
++	dw[n++] = b->sy << 8;
++	dw[n++] = (b->sy + b->sh - 1) << 8;
++	dw[n++] = a6_pkt4(0xb4c0, 5);	/* TPL1_A2D_SRC_TEXTURE_INFO, SIZE, BASE, PITCH */
++	dw[n++] = 0x00500430 | (b->filter ? 0x10000 : 0);	/* 8888, linear, WXYZ */
++	dw[n++] = b->src_w | (b->src_h << 15);
++	dw[n++] = (uint32_t)b->src_iova;
++	dw[n++] = (uint32_t)(b->src_iova >> 32);
++	dw[n++] = b->src_pitch << 3;
++	dw[n++] = a6_pkt4(0xb4ca, 3);	/* TPL1_A2D_SRC_TEXTURE_FLAG_BASE, _PITCH */
++	dw[n++] = (uint32_t)b->src_iova;
++	dw[n++] = (uint32_t)(b->src_iova >> 32);
++	dw[n++] = 0;
++	dw[n++] = a6_pkt4(0x8c17, 4);	/* RB_A2D_DEST_BUFFER_INFO, BASE, PITCH (64 B units) */
++	dw[n++] = 0x430;
++	dw[n++] = (uint32_t)b->dst_iova;
++	dw[n++] = (uint32_t)(b->dst_iova >> 32);
++	dw[n++] = b->dst_pitch >> 6;
++	dw[n++] = a6_pkt4(0x8c20, 3);	/* RB_A2D_DEST_FLAG_BUFFER_BASE, _PITCH */
++	dw[n++] = (uint32_t)b->dst_iova;
++	dw[n++] = (uint32_t)(b->dst_iova >> 32);
++	dw[n++] = 0;
++	dw[n++] = a6_pkt7(A6_CP_BLIT, 1);
++	dw[n++] = 3;			/* BLIT_OP_SCALE */
++	EV_TS(EV_PC_CCU_FLUSH_COLOR_TS);
++	EV_TS(EV_PC_CCU_FLUSH_DEPTH_TS);
++	EV_TS(EV_CACHE_FLUSH_TS);
++#undef EV
++#undef EV_TS
++#undef REG
++	return n;
++}
++
++/* Self-test on scratch buffers (no display): fill 8 rows, blit, read back. */
++int
++a6_blit_test(struct a6_gpu *g)
++{
++	enum { W = 1080, H = 8, PITCH = 4352 };
++	const uint64_t src_off = 0x900000, dst_off = 0xa00000;
++	uint64_t src_pa = a6_pool_pa(g, src_off), dst_pa = a6_pool_pa(g, dst_off);
++	uint32_t row[W];
++	for (uint32_t y = 0; y < H; y++) {
++		for (uint32_t x = 0; x < W; x++) {
++			row[x] = 0xff000000u | ((x * 255u / (W - 1)) << 16) | (y * 16u << 8) |
++			    (255u - (x * 255u / (W - 1)));
++		}
++		a6_write(src_pa + (uint64_t)y * PITCH, row, sizeof(row));
++	}
++	uint32_t zero = 0;
++	for (uint32_t y = 0; y < H; y++) {
++		a6_write(dst_pa + (uint64_t)y * PITCH, &zero, 4);
++	}
++	struct a6_blit b = {
++		.src_iova = a6_pool_va(src_off), .src_w = W, .src_h = H, .src_pitch = PITCH,
++		.sw = W, .sh = H, .dst_iova = a6_pool_va(dst_off), .dst_pitch = PITCH,
++		.dx = 0, .dy = 0, .dw = W, .dh = H, .filter = false,
++	};
++	static uint32_t dw[4096];
++	uint32_t n = a6_blit_ib(g, &b, dw);
++	if (n >= 4096) {
++		a6_log("2d: ib too big (%u)\n", n);
++		return -1;
++	}
++	int rc = a6_ring(g, dw, n, "2d blit", 2000);
++	if (rc) {
++		a6_log("2d: blit ring failed\n");
++		return rc;
++	}
++	uint32_t bad = 0;
++	for (uint32_t y = 0; y < H; y++) {
++		a6_read(dst_pa + (uint64_t)y * PITCH, row, sizeof(row));
++		for (uint32_t x = 0; x < W; x++) {
++			uint32_t want = 0xff000000u | ((x * 255u / (W - 1)) << 16) | (y * 16u << 8) |
++			    (255u - (x * 255u / (W - 1)));
++			if (row[x] != want) {
++				bad++;
++			}
++		}
++	}
++	a6_log("2d: blit %ux%u %s (%u bad)\n", W, H, bad ? "FAILED" : "ok", bad);
++	return bad ? -1 : 0;
++}
++
 +/* GPU paint validation: one burst CP_MEM_WRITE row then CP_MEMCPY rows,
 + * into the pool (verified from the CPU) and then the panel. */
 +static uint32_t
@@ -1657,6 +1800,8 @@ index 0000000..077076e
 +	STAGE_OK(10, "cp selftest");
 +	if (!rc && a6_paint)
 +		(void)a6_paint_test(g);		/* validation only */
++	if (!rc && a6_2d)
++		(void)a6_blit_test(g);		/* validation only */
 +	(void)sweet_gpu_panel_probe();
 +	int running = a6_cp_running(g);
 +
@@ -1703,10 +1848,10 @@ index 0000000..077076e
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..1a54a93
+index 0000000..6b13966
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,169 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1812,11 +1957,25 @@ index 0000000..1a54a93
 +extern int a6_fence_mode;
 +extern int a6_gmu_clk_500;
 +extern int a6_paint;		/* sweetgpupaint=1: CP_MEM_WRITE/CP_MEMCPY test */
++extern int a6_2d;		/* sweetgpu2d=1: 2D blit self-test */
 +
 +void a6_init_state(struct a6_gpu *g, uint64_t pool_pa);
 +int a6_power_up(struct a6_gpu *g);	/* CX+GMU+HFI+GX+CP; 0 = ok */
 +int a6_selftest(struct a6_gpu *g);	/* ring a CP_MEM_WRITE; 0 = the value landed */
 +int sweet_gpu_panel_probe(void);	/* environment: read-only DPU SSPP probe */
++
++/* 2D blit engine (RB_A2D/GRAS_A2D/TPL1_A2D), after turnip's r2d path. */
++struct a6_blit {
++	uint64_t src_iova;
++	uint32_t src_w, src_h, src_pitch;
++	uint32_t sw, sh;		/* source crop */
++	uint32_t dst_iova;
++	uint32_t dst_pitch;		/* 64-byte units in the register */
++	uint32_t dx, dy, dw, dh;
++	bool filter;			/* bilinear */
++};
++uint32_t a6_blit_ib(const struct a6_gpu *g, const struct a6_blit *b, uint32_t *dw);
++int a6_blit_test(struct a6_gpu *g);
 +bool a6_cx_up(void);
 +bool a6_gx_up(void);
 +bool a6_cp_running(const struct a6_gpu *g);
@@ -1864,10 +2023,10 @@ index 0000000..1a54a93
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..f70cb6c
+index 0000000..41f3006
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,433 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -1930,6 +2089,7 @@ index 0000000..f70cb6c
 +int a6_fence_mode = 0;
 +int a6_gmu_clk_500 = 0;
 +int a6_paint = 0;
++int a6_2d = 0;
 +static LCK_GRP_DECLARE(sweet_gpu_grp, "sweet_gpu");
 +static LCK_MTX_DECLARE(sweet_gpu_lock, &sweet_gpu_grp);
 +
@@ -2139,6 +2299,7 @@ index 0000000..f70cb6c
 +	(void)PE_parse_boot_argn("sweetgpufence", &a6_fence_mode, sizeof(a6_fence_mode));
 +	(void)PE_parse_boot_argn("sweetgpugmuclk", &a6_gmu_clk_500, sizeof(a6_gmu_clk_500));
 +	(void)PE_parse_boot_argn("sweetgpupaint", &a6_paint, sizeof(a6_paint));
++	(void)PE_parse_boot_argn("sweetgpu2d", &a6_2d, sizeof(a6_2d));
 +	vm_offset_t va = 0;
 +	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
