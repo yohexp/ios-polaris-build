@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..36eb816
+index 0000000..aa73e20
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1479 @@
+@@ -0,0 +1,1483 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -476,7 +476,7 @@ index 0000000..36eb816
 +	uint32_t want = (1u << 31) | sid;
 +	/* SMR0 is the bootloader mask-probe scratch and does not accept writes
 +	 * on polaris; use only the real groups 1..4. */
-+	for (int i = 1; i <= 4; i++) {
++	for (int i = 0; i <= 4; i++) {
 +		if (rd32(SMR(i)) >> 31)
 +			continue;
 +		wr32(S2CR(i), (3u << 24) | (uint32_t)cb);
@@ -1422,6 +1422,10 @@ index 0000000..36eb816
 +static int gpu_cp(struct a6_gpu *g)
 +{
 +	stage("gpu smmu");
++	/* Vendor arm_smmu_context_bank_reset: clear CACHE_LOCK in sACR (GR0+0x10). */
++	uint32_t acr = rd32(SMMU + 0x10);
++	wr32(SMMU + 0x10, acr & ~(1u << 26));
++	a6_log("smmu: sacr %x -> %x\n", acr, rd32(SMMU + 0x10));
 +	if (smmu_pick(&g->gpu_smr, &g->gpu_cb, g->gmu_cb + 1, GPU_SID)) {
 +		a6_log("smmu: no free smr/cb for the GPU\n");
 +		return -1;
