@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..0985f54
+index 0000000..78a5f1d
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1527 @@
+@@ -0,0 +1,1541 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1131,26 +1131,33 @@ index 0000000..0985f54
 +#define ZAP_SIZE	0x2000u
 +#define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
 +
-+/* QSEE returns SCM_INTERRUPTED (1) when the call was preempted; the vendor
-+ * retries the same call until it completes. */
++/* QSEE returns SCM_INTERRUPTED (1) when a non-secure interrupt hits the call.
++ * Linux's __scm_smc_do_quirk resumes with x0 = 1 and the x6 token the TZ
++ * handed back, on the same CPU.  Without this the zap INIT_IMAGE returns 1. */
 +#define SCM_INTERRUPTED	1
 +#define SCM_MAX_RETRY	10000
 +
 +static int64_t scm(uint32_t cmd, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *r1)
 +{
-+	uint64_t x[8];
++	uint64_t x[8] = { 0 };
++	uint64_t tok = 0;
 +	int i;
++	_disable_preemption();
 +	for (i = 0; i < SCM_MAX_RETRY; i++) {
-+		x[0] = SCM_PIL(cmd);
++		x[0] = i ? SCM_INTERRUPTED : SCM_PIL(cmd);
 +		x[1] = arginfo;
 +		x[2] = a;
 +		x[3] = b;
 +		x[4] = c;
-+		x[5] = x[6] = x[7] = 0;
++		x[5] = 0;
++		x[6] = i ? tok : 0;
++		x[7] = 0;
 +		a6_smc(x);
 +		if (x[0] != SCM_INTERRUPTED)
 +			break;
++		tok = x[6];
 +	}
++	_enable_preemption();
 +	if (r1)
 +		*r1 = x[1];
 +	return (int64_t)x[0];
@@ -1160,20 +1167,25 @@ index 0000000..0985f54
 +static int64_t scm2(uint32_t svc, uint32_t cmd, uint32_t arginfo, uint64_t a,
 +    uint64_t b, uint64_t c, uint64_t d, uint64_t *r1)
 +{
-+	uint64_t x[8];
++	uint64_t x[8] = { 0 };
++	uint64_t fn = 0x42000000ull | ((uint64_t)svc << 8) | cmd, tok = 0;
 +	int i;
++	_disable_preemption();
 +	for (i = 0; i < SCM_MAX_RETRY; i++) {
-+		x[0] = 0x42000000ull | ((uint64_t)svc << 8) | cmd;
++		x[0] = i ? SCM_INTERRUPTED : fn;
 +		x[1] = arginfo;
 +		x[2] = a;
 +		x[3] = b;
 +		x[4] = c;
 +		x[5] = d;
-+		x[6] = x[7] = 0;
++		x[6] = i ? tok : 0;
++		x[7] = 0;
 +		a6_smc(x);
 +		if (x[0] != SCM_INTERRUPTED)
 +			break;
++		tok = x[6];
 +	}
++	_enable_preemption();
 +	if (r1)
 +		*r1 = x[1];
 +	return (int64_t)x[0];
@@ -1197,7 +1209,9 @@ index 0000000..0985f54
 +		a6_log("zap: init image rc %lld r1 %llx (meta %x)\n", (long long)rc, (unsigned long long)r1, meta);
 +		return -1;
 +	}
-+	rc = scm(2, 3, PAS_GPU, meta, 0x1000, &r1);
++	/* Vendor/flame sequence: the segment lives in the DT's reserved
++	 * gpu_region, not the metadata buffer. */
++	rc = scm(2, 3, PAS_GPU, ZAP_REGION, ZAP_SIZE, &r1);
 +	if (rc || r1) {
 +		a6_log("zap: mem setup rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +		return -1;
@@ -1205,7 +1219,7 @@ index 0000000..0985f54
 +	static uint8_t seg[ZAP_SIZE];
 +	memset(seg, 0, sizeof(seg));
 +	memcpy(seg, b02, slen);
-+	a6_write(a6_pool_pa(g, off), seg, ZAP_SIZE);
++	a6_write(ZAP_REGION, seg, ZAP_SIZE);
 +	rc = scm(5, 1, PAS_GPU, 0, 0, &r1);
 +	a6_log("zap: auth and reset rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +	return rc || r1 ? -1 : 0;
@@ -1933,6 +1947,7 @@ index 0000000..96280c4
 +	x[1] = x1;
 +	x[2] = x2;
 +	x[3] = x3;
++	x[6] = x6;		/* ARM_SMCCC_QUIRK_QCOM_A6 resume token */
 +}
 +
 +const uint8_t *
