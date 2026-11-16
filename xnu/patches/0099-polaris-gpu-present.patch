@@ -1,0 +1,97 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,8 +37,18 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ 
++/* bsd/dev/sweet_gpu.c: copy each swapped surface to the panel with the
++ * Adreno (boot-arg sweetfbgpu=1; falls back to the CPU copy). */
++extern "C" {
++bool sweet_gpu_ready(void);
++int sweet_gpu_surface_slot(uint64_t key);
++int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
++int sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t sx, uint32_t sy,
++    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
++}
++
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+ #include <IOKit/IOUserClient.h>
+ #include <IOKit/IOKitKeys.h>
+@@ -48,8 +58,9 @@
+ #include <IOKit/IOTimerEventSource.h>
+ #include <IOKit/system.h>
+ #include <pexpert/pexpert.h>
+ #include <kern/clock.h>
++#include <arm/caches_internal.h>
+ #include <sys/proc.h>
+ 
+ enum {
+ 	kSweetFBGetLayerDefaultSurface  = 3,
+@@ -307,8 +318,21 @@
+ 		IOLog("SWEET FB: %llu swaps\n", sweet_fb_swap_count);
+ 	}
+ }
+ 
++/* GPU present is opt-in (sweetfbgpu=1) and only once the Adreno is up. */
++static int sweet_fb_gpu_arg = -1, sweet_fb_gpu_logged, sweet_fb_gpu_flushed;
++static bool
++sweet_fb_gpu_on(void)
++{
++	if (sweet_fb_gpu_arg < 0) {
++		int on = 0;
++		PE_parse_boot_argn("sweetfbgpu", &on, sizeof(on));
++		sweet_fb_gpu_arg = on ? 1 : 0;
++	}
++	return sweet_fb_gpu_arg && sweet_gpu_ready();
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
+@@ -388,8 +412,43 @@
+ 		    (uint64_t)(sx + w) * 4;
+ 		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
++		}
++		if (src != 0 && bpe == 4 && sweet_fb_gpu_on()) {
++			uint64_t key = ((uint64_t)id << 48) ^ (uint64_t)(uintptr_t)s->memory;
++			int slot = sweet_gpu_surface_slot(key);
++			if (slot < 0) {
++				static uint64_t pages[1024];
++				uint32_t np = 0;
++				uint64_t len = s->memory->getLength();
++				bool ok = len <= sizeof(pages) / sizeof(pages[0]) * PAGE_SIZE &&
++				    s->memory->prepare() == kIOReturnSuccess;
++				for (uint64_t o = 0; ok && o < len; o += PAGE_SIZE) {
++					IOByteCount seg = 0;
++					addr64_t pa = s->memory->getPhysicalSegment(o, &seg, kIOMemoryMapperNone);
++					ok = pa != 0 && (pa & PAGE_MASK) == 0;
++					pages[np++] = pa;
++				}
++				if (ok) {
++					slot = sweet_gpu_map_surface(key, pages, np, PAGE_SIZE);
++				}
++			}
++			if (slot >= 0 && sweet_gpu_present(slot, src, s->offset, sx, sy, dx, dy, w, h,
++			    s->bytesPerRow, fRowBytes) == 0) {
++				if (!sweet_fb_gpu_flushed) {
++					sweet_fb_gpu_flushed = 1;
++					/* Drop the console's dirty lines: the GPU owns the panel now. */
++					flush_dcache64((addr64_t)fPixels, (unsigned)((uint64_t)fRowBytes * fHeight), TRUE);
++				}
++				if (!sweet_fb_gpu_logged) {
++					sweet_fb_gpu_logged = 1;
++					IOLog("SWEET FB: GPU present %dx%d pitch %u -> %u\n", w, h,
++					    s->bytesPerRow, fRowBytes);
++				}
++				s->release();
++				continue;
++			}
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),

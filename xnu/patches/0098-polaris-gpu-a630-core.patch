@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..f5e9022
+index 0000000..3035c64
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1620 @@
+@@ -0,0 +1,1648 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1310,6 +1310,34 @@ index 0000000..f5e9022
 +	return rc || v != 0xcafef00d ? -1 : 0;
 +}
 +
++uint32_t
++a6_present_ib(struct a6_gpu *g, uint64_t off, uint64_t src, uint32_t sx, uint32_t sy,
++    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch)
++{
++	uint32_t dw[6 * 256], n = 0, bn = 0;
++	uint64_t pa = a6_pool_pa(g, off);
++	for (uint32_t y = 0; y < h; y++) {
++		uint64_t s = src + (uint64_t)(sy + y) * src_pitch + 4ull * sx;
++		uint64_t d = A6_GVA_FB + (uint64_t)(dy + y) * dst_pitch + 4ull * dx;
++		dw[bn++] = a6_pkt7(A6_CP_MEMCPY, 5);
++		dw[bn++] = w;
++		dw[bn++] = (uint32_t)s;
++		dw[bn++] = (uint32_t)(s >> 32);
++		dw[bn++] = (uint32_t)d;
++		dw[bn++] = (uint32_t)(d >> 32);
++		if (bn == sizeof(dw) / 4) {
++			a6_write(pa + 4ull * n, dw, 4ull * bn);
++			n += bn;
++			bn = 0;
++		}
++	}
++	if (bn) {
++		a6_write(pa + 4ull * n, dw, 4ull * bn);
++		n += bn;
++	}
++	return n;
++}
++
 +/* GPU paint validation: one burst CP_MEM_WRITE row then CP_MEMCPY rows,
 + * into the pool (verified from the CPU) and then the panel. */
 +static uint32_t
@@ -1674,10 +1702,10 @@ index 0000000..f5e9022
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..f5c7f82
+index 0000000..11001a8
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,154 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1730,6 +1758,7 @@ index 0000000..f5c7f82
 +#define A6_OFF_RING		0x210000ull
 +#define A6_OFF_SCRATCH		0x218000ull
 +#define A6_OFF_FREE		0x400000ull
++#define A6_OFF_PRESENT		0x800000ull	/* CP_MEMCPY present IB (52 KB) */
 +
 +#define A6_GVA_POOL		0x10000000ull
 +#define A6_GVA_FB		0x20000000ull
@@ -1797,6 +1826,10 @@ index 0000000..f5c7f82
 +int a6_submit_ib(struct a6_gpu *g, uint64_t iova, uint32_t dwords, unsigned timeout_ms);
 +uint32_t a6_fence_read(const struct a6_gpu *g);
 +
++/* Build a 1:1 crop copy (CP_MEMCPY rows) from a surface IOVA to the panel
++ * into the pool at off; returns the dword count. */
++uint32_t a6_present_ib(struct a6_gpu *g, uint64_t off, uint64_t src, uint32_t sx, uint32_t sy,
++    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
 +int a6_map(struct a6_gpu *g, uint64_t iova, uint64_t pa, uint64_t size);
 +int a6_map_pages(struct a6_gpu *g, uint64_t iova, const uint64_t *pages, uint32_t npages, uint32_t page_size);
 +void a6_unmap_high(struct a6_gpu *g);
@@ -1829,10 +1862,10 @@ index 0000000..f5c7f82
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..787200f
+index 0000000..750e29d
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,392 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -1875,6 +1908,10 @@ index 0000000..787200f
 +void sweet_gpu_init(void);
 +bool sweet_gpu_ready(void);
 +uint64_t sweet_gpu_pool_pa(void);
++int sweet_gpu_surface_slot(uint64_t key);
++int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
++int sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t sx, uint32_t sy,
++    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
 +
 +static struct a6_gpu gpu;
 +static vm_offset_t pool_kva;
@@ -2124,5 +2161,100 @@ index 0000000..787200f
 +sweet_gpu_pool_pa(void)
 +{
 +	return gpu.pool_pa;
++}
++
++/* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
++
++#define SLOTS		4
++#define SLOT_IOVA(n)	(0x100000000ULL + 0x1000000ULL * (n))
++#define SLOT_MAX	0x1000000ULL
++#define SLOT_PAGES	1024		/* 16 KB pages: 16 MB */
++
++static struct {
++	uint64_t key;
++	uint32_t npages, page_size;
++	uint64_t used;
++} slot[SLOTS];
++static uint64_t slot_clock;
++
++int
++sweet_gpu_surface_slot(uint64_t key)
++{
++	for (int i = 0; i < SLOTS; i++) {
++		if (slot[i].key == key && slot[i].npages) {
++			slot[i].used = ++slot_clock;
++			return i;
++		}
++	}
++	return -1;
++}
++
++int
++sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size)
++{
++	if (!gpu_ready || npages == 0 || npages > SLOT_PAGES ||
++	    (uint64_t)npages * page_size > SLOT_MAX) {
++		return -1;
++	}
++	int s = 0;
++	for (int i = 1; i < SLOTS; i++) {
++		if (slot[i].used < slot[s].used) {
++			s = i;
++		}
++	}
++	lck_mtx_lock(&sweet_gpu_lock);
++	int rc = a6_map_pages(&gpu, SLOT_IOVA(s), pages, npages, page_size);
++	a6_tlb_flush(&gpu);
++	lck_mtx_unlock(&sweet_gpu_lock);
++	if (rc) {
++		slot[s].npages = 0;
++		return -1;
++	}
++	slot[s].npages = npages;
++	slot[s].page_size = page_size;
++	slot[s].key = key;
++	slot[s].used = ++slot_clock;
++	a6_log("surface %llx -> slot %d (%u x %u)\n", key, s, npages, page_size);
++	return s;
++}
++
++static uint64_t stat_present, stat_clean, stat_copy;
++
++int
++sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t sx, uint32_t sy,
++    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch)
++{
++	if (!gpu_ready || s < 0 || s >= SLOTS || !slot[s].npages || w == 0 || h == 0) {
++		return -1;
++	}
++	uint64_t t0 = mach_absolute_time();
++	if (kva) {
++		clean_dcache64((addr64_t)kva, (unsigned)((uint64_t)src_pitch * h + offset), FALSE);
++	}
++	uint64_t t1 = mach_absolute_time();
++	lck_mtx_lock(&sweet_gpu_lock);
++	uint32_t n = a6_present_ib(&gpu, A6_OFF_PRESENT, SLOT_IOVA(s) + offset, sx, sy, dx, dy,
++	    w, h, src_pitch, dst_pitch);
++	int rc = a6_submit_ib(&gpu, a6_pool_va(A6_OFF_PRESENT), n, 200);
++	if (rc) {
++		uint64_t far;
++		uint32_t syn, fsr = a6_fault_status(&gpu, &far, &syn);
++		a6_log("present: timeout (%u rows, smmu fsr %x far %llx); CPU copy\n", h, fsr, far);
++		(void)a6_clear_fault(&gpu);
++		gpu_ready = false;
++	}
++	lck_mtx_unlock(&sweet_gpu_lock);
++	uint64_t t2 = mach_absolute_time();
++	stat_clean += t1 - t0;
++	stat_copy += t2 - t1;
++	if ((++stat_present % 300) == 0) {
++		uint64_t c, g;
++		absolutetime_to_nanoseconds(stat_clean, &c);
++		absolutetime_to_nanoseconds(stat_copy, &g);
++		a6_log("present: %llu frames, avg clean %llu us, GPU copy %llu us\n", stat_present,
++		    c / 1000 / 300, g / 1000 / 300);
++		stat_clean = stat_copy = 0;
++	}
++	return rc;
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
