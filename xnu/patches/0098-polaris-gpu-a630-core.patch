@@ -2030,10 +2030,10 @@ index 0000000..3151052
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..3a939da
+index 0000000..57ee470
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,520 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2382,11 +2382,11 @@ index 0000000..3a939da
 +
 +/* ---- v2 buffer pool (RAM XNU does not map) and self-test ---- */
 +
-+/* ADT dram-size is 1.23 GB from 0xb0000000 (XNU's physmap); the DT's second
-+ * memory region at 5 GB (0x140000000, 3 GB) is general DRAM outside it.  Use
-+ * the first 512 MB for write-combined GPU buffers (no physmap alias). */
-+#define GPOOL_BASE	0x140000000ull
-+#define GPOOL_LIMIT	0x160000000ull
++/* Reserved no-map DRAM below 4 GB (the DT's ramdump framebuffer region):
++ * outside XNU's physmap, so the write-combined client mapping has no
++ * cacheable alias.  16 MB, enough to validate the v2 model. */
++#define GPOOL_BASE	0xaf000000ull
++#define GPOOL_LIMIT	0xb0000000ull
 +static uint64_t gpool_next = GPOOL_BASE;
 +
 +int
@@ -2411,6 +2411,7 @@ index 0000000..3a939da
 +		a6_log("v2: pool exhausted\n");
 +		return -1;
 +	}
++	a6_log("v2: bo %llx, mapping it\n", (unsigned long long)bo_pa);
 +	vm_offset_t bo_va = ml_io_map_unmappable((vm_offset_t)bo_pa, 0x10000, VM_WIMG_IO);
 +	if (!bo_va) {
 +		a6_log("v2: no I/O map for %llx\n", (unsigned long long)bo_pa);
