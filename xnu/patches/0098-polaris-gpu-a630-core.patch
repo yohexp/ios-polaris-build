@@ -1703,10 +1703,10 @@ index 0000000..077076e
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..11001a8
+index 0000000..1a54a93
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,155 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1816,6 +1816,7 @@ index 0000000..11001a8
 +void a6_init_state(struct a6_gpu *g, uint64_t pool_pa);
 +int a6_power_up(struct a6_gpu *g);	/* CX+GMU+HFI+GX+CP; 0 = ok */
 +int a6_selftest(struct a6_gpu *g);	/* ring a CP_MEM_WRITE; 0 = the value landed */
++int sweet_gpu_panel_probe(void);	/* environment: read-only DPU SSPP probe */
 +bool a6_cx_up(void);
 +bool a6_gx_up(void);
 +bool a6_cp_running(const struct a6_gpu *g);
