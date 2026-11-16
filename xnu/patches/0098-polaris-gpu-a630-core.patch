@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..aa73e20
+index 0000000..0985f54
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1483 @@
+@@ -0,0 +1,1527 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1131,10 +1131,26 @@ index 0000000..aa73e20
 +#define ZAP_SIZE	0x2000u
 +#define SCM_PIL(cmd)	(0x42000000ull | (2u << 8) | (cmd))
 +
++/* QSEE returns SCM_INTERRUPTED (1) when the call was preempted; the vendor
++ * retries the same call until it completes. */
++#define SCM_INTERRUPTED	1
++#define SCM_MAX_RETRY	10000
++
 +static int64_t scm(uint32_t cmd, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *r1)
 +{
-+	uint64_t x[8] = { SCM_PIL(cmd), arginfo, a, b, c, 0, 0, 0 };
-+	a6_smc(x);
++	uint64_t x[8];
++	int i;
++	for (i = 0; i < SCM_MAX_RETRY; i++) {
++		x[0] = SCM_PIL(cmd);
++		x[1] = arginfo;
++		x[2] = a;
++		x[3] = b;
++		x[4] = c;
++		x[5] = x[6] = x[7] = 0;
++		a6_smc(x);
++		if (x[0] != SCM_INTERRUPTED)
++			break;
++	}
 +	if (r1)
 +		*r1 = x[1];
 +	return (int64_t)x[0];
@@ -1144,9 +1160,20 @@ index 0000000..aa73e20
 +static int64_t scm2(uint32_t svc, uint32_t cmd, uint32_t arginfo, uint64_t a,
 +    uint64_t b, uint64_t c, uint64_t d, uint64_t *r1)
 +{
-+	uint64_t x[8] = { 0x42000000ull | ((uint64_t)svc << 8) | cmd,
-+	    arginfo, a, b, c, d, 0, 0 };
-+	a6_smc(x);
++	uint64_t x[8];
++	int i;
++	for (i = 0; i < SCM_MAX_RETRY; i++) {
++		x[0] = 0x42000000ull | ((uint64_t)svc << 8) | cmd;
++		x[1] = arginfo;
++		x[2] = a;
++		x[3] = b;
++		x[4] = c;
++		x[5] = d;
++		x[6] = x[7] = 0;
++		a6_smc(x);
++		if (x[0] != SCM_INTERRUPTED)
++			break;
++	}
 +	if (r1)
 +		*r1 = x[1];
 +	return (int64_t)x[0];
@@ -1165,6 +1192,7 @@ index 0000000..aa73e20
 +	}
 +	a6_write(a6_pool_pa(g, off), mdt, mlen);
 +	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta, 0, &r1);
++	a6_log("zap: init image raw rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +	if (rc || r1) {
 +		a6_log("zap: init image rc %lld r1 %llx (meta %x)\n", (long long)rc, (unsigned long long)r1, meta);
 +		return -1;
@@ -1480,17 +1508,33 @@ index 0000000..aa73e20
 +	STAGE_OK(8, "cp me_init");
 +	stage("zap");
 +	if (zap_load(g)) {
-+		a6_log("zap failed; continuing non-secure (CP selftest will decide)\n");
++		/* a6xx without the zap: the GPU stays trusted unless RBBM clears
++		 * it (CP_SET_SECURE_MODE is the a5xx mechanism).  A secured CP
++		 * sends its data writes down the secure SID and they are dropped. */
++		a6_log("zap failed; unsecure via RBBM_SECVID_TRUST_CNTL\n");
++		wr32(GREG(0xf400), 0);
++		a6_log("rb trust cntl -> %x\n", rd32(GREG(0xf400)));
 +	} else {
 +		STAGE_OK(9, "zap");
++		uint32_t secure[] = { a6_pkt7(A6_CP_SET_SECURE_MODE, 1), 0 };
++		if (a6_ring(g, secure, 2, "secure mode off", 2000))
++			return -1;
 +	}
-+	uint32_t secure[] = { a6_pkt7(A6_CP_SET_SECURE_MODE, 1), 0 };
-+	if (a6_ring(g, secure, 2, "secure mode off", 2000))
-+		return -1;
 +
 +	/* Prove the CP executes while the GX rail is still held on. */
 +	stage("cp selftest");
 +	rc = a6_selftest(g);
++	if (rc) {
++		uint64_t far = 0;
++		uint32_t syn = 0, fsr = a6_fault_status(g, &far, &syn);
++		a6_log("selftest: cb%d fsr %x far %llx fsynr0 %x\n", g->gpu_cb, fsr,
++		       (unsigned long long)far, syn);
++		if (fsr) {
++			a6_clear_fault(g);
++			rc = a6_selftest(g);
++			a6_log("selftest retry after clear: %s\n", rc ? "FAILED" : "ok");
++		}
++	}
 +	STAGE_OK(10, "cp selftest");
 +	int running = a6_cp_running(g);
 +
