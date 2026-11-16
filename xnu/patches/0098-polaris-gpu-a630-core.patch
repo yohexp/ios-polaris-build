@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..3232012
+index 0000000..f5e9022
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1545 @@
+@@ -0,0 +1,1620 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1310,6 +1310,79 @@ index 0000000..3232012
 +	return rc || v != 0xcafef00d ? -1 : 0;
 +}
 +
++/* GPU paint validation: one burst CP_MEM_WRITE row then CP_MEMCPY rows,
++ * into the pool (verified from the CPU) and then the panel. */
++static uint32_t
++paint_px(uint32_t x)
++{
++	uint32_t r = x * 255u / 1079u;
++	return 0xff000000u | (r << 16) | (0x80u << 8) | (255u - r);
++}
++
++static int
++a6_paint_test(struct a6_gpu *g)
++{
++	enum { PW = 1080, PH = 600, PANEL_ROWS = 120 };
++	const uint32_t stride = 4320;
++	uint64_t pa = a6_pool_pa(g, A6_OFF_FREE), va = a6_pool_va(A6_OFF_FREE);
++	static uint32_t dw[4 + PW + 6 * PH];
++	uint32_t n = 0, bad = 0;
++
++	dw[n++] = a6_pkt7(A6_CP_MEM_WRITE, 2 + PW);
++	dw[n++] = (uint32_t)va;
++	dw[n++] = (uint32_t)(va >> 32);
++	for (uint32_t x = 0; x < PW; x++)
++		dw[n++] = paint_px(x);
++	dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
++	for (uint32_t y = 1; y < PH; y++) {
++		uint64_t dst = va + (uint64_t)y * stride;
++		dw[n++] = a6_pkt7(A6_CP_MEMCPY, 5);
++		dw[n++] = PW;
++		dw[n++] = (uint32_t)va;
++		dw[n++] = (uint32_t)(va >> 32);
++		dw[n++] = (uint32_t)dst;
++		dw[n++] = (uint32_t)(dst >> 32);
++	}
++	int rc = a6_ring(g, dw, n, "paint", 5000);
++	if (rc) {
++		a6_log("paint: CP_MEMCPY band failed\n");
++		return rc;
++	}
++	for (uint32_t y = 0; y < PH; y += 97) {
++		for (uint32_t x = 0; x < PW; x += 251) {
++			uint32_t v = 0;
++			a6_read(pa + (uint64_t)y * stride + 4ull * x, &v, 4);
++			if (v != paint_px(x))
++				bad++;
++		}
++	}
++	a6_log("paint: %ux%u band in pool, %u mismatches %s\n", PW, PH, bad,
++	       bad ? "FAILED" : "ok");
++
++	/* The panel is redrawn by the CPU at 60 Hz, so this is a one-frame
++	 * check that the GPU can write the real framebuffer mapping. */
++	uint64_t fb = A6_GVA_FB + 700ull * stride;
++	n = 0;
++	dw[n++] = a6_pkt7(A6_CP_MEM_WRITE, 2 + PW);
++	dw[n++] = (uint32_t)fb;
++	dw[n++] = (uint32_t)(fb >> 32);
++	for (uint32_t x = 0; x < PW; x++)
++		dw[n++] = paint_px(x);
++	dw[n++] = a6_pkt7(A6_CP_WAIT_FOR_IDLE, 0);
++	for (uint32_t y = 1; y < PANEL_ROWS; y++) {
++		uint64_t dst = fb + (uint64_t)y * stride;
++		dw[n++] = a6_pkt7(A6_CP_MEMCPY, 5);
++		dw[n++] = PW;
++		dw[n++] = (uint32_t)fb;
++		dw[n++] = (uint32_t)(fb >> 32);
++		dw[n++] = (uint32_t)dst;
++		dw[n++] = (uint32_t)(dst >> 32);
++	}
++	rc = a6_ring(g, dw, n, "paint panel", 5000);
++	a6_log("paint: panel row 700..%u %s\n", 700 + PANEL_ROWS - 1, rc ? "FAILED" : "ok");
++	return bad ? -1 : rc;
++}
++
 +/* ---- GPU page tables ---- */
 +
 +static void map_gpu_low(struct a6_gpu *g)
@@ -1554,6 +1627,8 @@ index 0000000..3232012
 +		}
 +	}
 +	STAGE_OK(10, "cp selftest");
++	if (!rc && a6_paint)
++		(void)a6_paint_test(g);		/* validation only */
 +	int running = a6_cp_running(g);
 +
 +	/* Done touching the GPU: let the GMU power manage it. */
@@ -1599,10 +1674,10 @@ index 0000000..3232012
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..edab7ef
+index 0000000..f5c7f82
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,149 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1619,7 +1694,8 @@ index 0000000..edab7ef
 + *     not at the a640 RSCC/PDC addresses.
 + *   - GX is brought up through the OOB BOOT_SLUMBER handshake and SPTPRAC.
 + *   - The GPU SMMU is the Adreno SMMU-v2 at 0x5040000; the GMU stream is
-+ *     SID 5 / mask 0x400, the GPU stream is SID 0 / mask 0x401.
++ *     SID 5 / mask 0x400, the GPU stream is exactly SID 0 (polaris
++ *     SMRs reject nonzero masks).
 + *
 + * One 16 MB contiguous pool (2 MB aligned) holds the GPU's own memory:
 + *
@@ -1660,7 +1736,7 @@ index 0000000..edab7ef
 +#define A6_RING_SIZE		0x8000u
 +#define A6_RING_DW		(A6_RING_SIZE / 4)
 +
-+#define A6_FB_PA		0x9c400000ull
++#define A6_FB_PA		0x9d400000ull
 +#define A6_FB_SIZE		0xa00000ull
 +
 +#define A6_GPU_ID		630
@@ -1705,6 +1781,7 @@ index 0000000..edab7ef
 +extern int a6_hfi_dump;
 +extern int a6_fence_mode;
 +extern int a6_gmu_clk_500;
++extern int a6_paint;		/* sweetgpupaint=1: CP_MEM_WRITE/CP_MEMCPY test */
 +
 +void a6_init_state(struct a6_gpu *g, uint64_t pool_pa);
 +int a6_power_up(struct a6_gpu *g);	/* CX+GMU+HFI+GX+CP; 0 = ok */
@@ -1752,10 +1829,10 @@ index 0000000..edab7ef
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..5c4c4ba
+index 0000000..787200f
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,293 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -1812,6 +1889,7 @@ index 0000000..5c4c4ba
 +int a6_hfi_dump = 0;
 +int a6_fence_mode = 0;
 +int a6_gmu_clk_500 = 0;
++int a6_paint = 0;
 +static LCK_GRP_DECLARE(sweet_gpu_grp, "sweet_gpu");
 +static LCK_MTX_DECLARE(sweet_gpu_lock, &sweet_gpu_grp);
 +
@@ -2020,6 +2098,7 @@ index 0000000..5c4c4ba
 +	(void)PE_parse_boot_argn("sweetgpuhfidump", &a6_hfi_dump, sizeof(a6_hfi_dump));
 +	(void)PE_parse_boot_argn("sweetgpufence", &a6_fence_mode, sizeof(a6_fence_mode));
 +	(void)PE_parse_boot_argn("sweetgpugmuclk", &a6_gmu_clk_500, sizeof(a6_gmu_clk_500));
++	(void)PE_parse_boot_argn("sweetgpupaint", &a6_paint, sizeof(a6_paint));
 +	vm_offset_t va = 0;
 +	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
