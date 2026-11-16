@@ -51,7 +51,7 @@
  AppleCLCD::present(const uint8_t *rec)
  {
  	uint32_t mask = get32(rec, 0x104);
-@@ -388,8 +412,43 @@
+@@ -388,8 +412,42 @@
  		    (uint64_t)(sx + w) * 4;
  		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
  		    s->memory == NULL || last > s->memory->getLength()) {
@@ -80,8 +80,7 @@
 +			    s->bytesPerRow, fRowBytes) == 0) {
 +				if (!sweet_fb_gpu_flushed) {
 +					sweet_fb_gpu_flushed = 1;
-+					/* Drop the console's dirty lines: the GPU owns the panel now. */
-+					flush_dcache64((addr64_t)fPixels, (unsigned)((uint64_t)fRowBytes * fHeight), TRUE);
++					IOLog("SWEET FB: GPU present active (%ux%u)\n", fWidth, fHeight);
 +				}
 +				if (!sweet_fb_gpu_logged) {
 +					sweet_fb_gpu_logged = 1;

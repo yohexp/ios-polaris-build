@@ -1862,10 +1862,10 @@ index 0000000..11001a8
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..750e29d
+index 0000000..a5f1c0b
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,398 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2227,15 +2227,21 @@ index 0000000..750e29d
 +	if (!gpu_ready || s < 0 || s >= SLOTS || !slot[s].npages || w == 0 || h == 0) {
 +		return -1;
 +	}
++	a6_log("present: start s%d %ux%u +%u,%u -> +%u,%u pitch %u->%u kva %llx\n", s, w, h,
++	    sx, sy, dx, dy, src_pitch, dst_pitch, (unsigned long long)kva);
 +	uint64_t t0 = mach_absolute_time();
 +	if (kva) {
 +		clean_dcache64((addr64_t)kva, (unsigned)((uint64_t)src_pitch * h + offset), FALSE);
 +	}
 +	uint64_t t1 = mach_absolute_time();
++	a6_log("present: cache cleaned\n");
 +	lck_mtx_lock(&sweet_gpu_lock);
 +	uint32_t n = a6_present_ib(&gpu, A6_OFF_PRESENT, SLOT_IOVA(s) + offset, sx, sy, dx, dy,
 +	    w, h, src_pitch, dst_pitch);
++	a6_log("present: ib %u dwords at %llx, submitting\n", n,
++	    (unsigned long long)a6_pool_va(A6_OFF_PRESENT));
 +	int rc = a6_submit_ib(&gpu, a6_pool_va(A6_OFF_PRESENT), n, 200);
++	a6_log("present: submit rc %d\n", rc);
 +	if (rc) {
 +		uint64_t far;
 +		uint32_t syn, fsr = a6_fault_status(&gpu, &far, &syn);
