@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..202e428
+index 0000000..37d3ac1
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1797 @@
+@@ -0,0 +1,1796 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1200,13 +1200,12 @@ index 0000000..202e428
 +	uint64_t r1 = 0;
 +	uint32_t mlen, slen;
 +	const uint8_t *mdt = a6_firmware("a630_zap.mdt", &mlen), *b02 = a6_firmware("a630_zap.b02", &slen);
-+	uint64_t off = A6_OFF_ZAP_META;
-+	uint32_t meta = (uint32_t)a6_pool_pa(g, off);	/* TZ PAS image address (physical) */
++	uint64_t meta = a6_zap_meta_pa();	/* TZ PAS image address (managed RAM) */
 +	if (!mdt || !b02 || slen > ZAP_SIZE) {
 +		a6_log("zap: missing a630_zap.mdt/.b02\n");
 +		return -1;
 +	}
-+	a6_write(a6_pool_pa(g, off), mdt, mlen);
++	a6_zap_meta_write(mdt, mlen);
 +	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta, 0, &r1);
 +	a6_log("zap: init image raw rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +	if (rc || r1) {
@@ -1851,10 +1850,10 @@ index 0000000..202e428
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..3151052
+index 0000000..6e61751
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,175 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1996,6 +1995,8 @@ index 0000000..3151052
 +
 +/* Build a 1:1 crop copy (CP_MEMCPY rows) from a surface IOVA to the panel
 + * into the pool at off; returns the dword count. */
++uint64_t a6_zap_meta_pa(void);	/* environment: managed buffer for PAS INIT_IMAGE */
++void a6_zap_meta_write(const void *buf, uint32_t len);
 +uint32_t a6_present_ib(struct a6_gpu *g, uint64_t off, uint64_t src, uint32_t sx, uint32_t sy,
 +    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
 +int a6_map(struct a6_gpu *g, uint64_t iova, uint64_t pa, uint64_t size);
@@ -2030,10 +2031,10 @@ index 0000000..3151052
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..63e1947
+index 0000000..7a5f4e3
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,553 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2085,6 +2086,9 @@ index 0000000..63e1947
 +
 +static struct a6_gpu gpu;
 +static vm_offset_t pool_kva;
++static vm_offset_t zap_kva;
++static uint64_t zap_pa;
++#define ZAP_META_BUF	0x4000u
 +static volatile bool gpu_ready;
 +static int gpu_sleep_chan;
 +int a6_stage_limit = 99;
@@ -2133,6 +2137,22 @@ index 0000000..63e1947
 +in_pool(uint64_t pa, size_t len)
 +{
 +	return pool_kva && pa >= gpu.pool_pa && pa + len <= gpu.pool_pa + A6_POOL_SIZE;
++}
++
++uint64_t
++a6_zap_meta_pa(void)
++{
++	return zap_pa;
++}
++
++void
++a6_zap_meta_write(const void *buf, uint32_t len)
++{
++	if (zap_kva == 0 || len > ZAP_META_BUF) {
++		return;
++	}
++	memcpy((void *)zap_kva, buf, len);
++	flush_dcache64((addr64_t)zap_kva, len, TRUE);
 +}
 +
 +uint32_t
@@ -2323,6 +2343,17 @@ index 0000000..63e1947
 +	a6_init_state(&gpu, pool_pa);
 +	pool_kva = va;
 +	__asm__ volatile ("dsb sy" ::: "memory");
++	/* The TZ only reads non-secure memory that the ADT calls OS RAM: with
++	 * --highmem that is above 4 GB, so the PAS metadata cannot live in the
++	 * low pool.  A small managed buffer, written and cleaned by VA. */
++	vm_offset_t zm = 0;
++	if (kmem_alloc_contig(kernel_map, &zm, ZAP_META_BUF, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		a6_log("no managed zap metadata buffer\n");
++		return;
++	}
++	zap_kva = zm;
++	zap_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)zm));
 +	thread_t thread;
 +	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS)
 +		thread_deallocate(thread);
