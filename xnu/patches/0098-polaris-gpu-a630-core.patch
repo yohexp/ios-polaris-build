@@ -2033,7 +2033,7 @@ index 0000000..6e61751
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..571ccad
+index 0000000..d4017f9
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
 @@ -0,0 +1,549 @@
@@ -2154,7 +2154,7 @@ index 0000000..571ccad
 +		return;
 +	}
 +	memcpy((void *)zap_kva, buf, len);
-+	flush_dcache64((addr64_t)zap_kva, len, TRUE);
++	__asm__ volatile ("dsb sy" ::: "memory");	/* uncached pool mapping */
 +}
 +
 +uint32_t
