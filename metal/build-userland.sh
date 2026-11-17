@@ -25,8 +25,13 @@ PY3=$(brew --prefix python 2>/dev/null)/bin/python3
 echo "python: $PY3"
 
 # ---- UniXNU: the mesa patch set -------------------------------------------
-git clone --depth 1 --filter=blob:none --sparse https://github.com/UniXNU/UniXNU.git "$W/unixnu" >/dev/null 2>&1
+# cd1b975 is the UniXNU snapshot whose turnip-darwin-kmd.patch speaks the
+# kernel's NativeAdreno ABI v1 (the 1439-line patch the flame used).
+git clone --filter=blob:none --no-checkout https://github.com/UniXNU/UniXNU.git "$W/unixnu" >/dev/null 2>&1
+git -C "$W/unixnu" sparse-checkout init --cone >/dev/null 2>&1
 git -C "$W/unixnu" sparse-checkout set patches/mesa scripts/data >/dev/null 2>&1
+git -C "$W/unixnu" fetch --depth 1 origin cd1b9757fd5d730bf85aabb37a4bce729ede9e58 >/dev/null 2>&1
+git -C "$W/unixnu" checkout -q cd1b9757fd5d730bf85aabb37a4bce729ede9e58
 python3 - "$W/unixnu" > "$W/mesa-patches.txt" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1] + '/scripts/data/adreno-compiler-inputs.json'))
