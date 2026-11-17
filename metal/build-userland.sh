@@ -69,7 +69,7 @@ c_link_args = [$FLAGS]
 cpp_link_args = [$FLAGS]
 objc_link_args = [$FLAGS]
 EOF
-python3 -m pip install --quiet mako pyyaml 2>/dev/null || true
+python3 -m pip install --quiet mako pyyaml packaging setuptools 2>/dev/null || true
 meson setup "$W/build-ios" "$W/mesa" --cross-file "$W/ios16.cross" \
 	-Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=darwin \
 	-Dtu-darwin-abi-dir="$ROOT/phone/turnip" -Dplatforms=macos -Dglx=disabled \
