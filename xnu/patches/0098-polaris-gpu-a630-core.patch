@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..37d3ac1
+index 0000000..f83eba4
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1796 @@
+@@ -0,0 +1,1798 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1200,12 +1200,14 @@ index 0000000..37d3ac1
 +	uint64_t r1 = 0;
 +	uint32_t mlen, slen;
 +	const uint8_t *mdt = a6_firmware("a630_zap.mdt", &mlen), *b02 = a6_firmware("a630_zap.b02", &slen);
-+	uint64_t meta = a6_zap_meta_pa();	/* TZ PAS image address (managed RAM) */
++	uint64_t meta = a6_zap_meta_pa();	/* below-4GB non-secure DRAM for the TZ */
 +	if (!mdt || !b02 || slen > ZAP_SIZE) {
 +		a6_log("zap: missing a630_zap.mdt/.b02\n");
 +		return -1;
 +	}
++	a6_log("zap: meta %llx, writing %u bytes\n", (unsigned long long)meta, mlen);
 +	a6_zap_meta_write(mdt, mlen);
++	a6_log("zap: calling PAS INIT_IMAGE\n");
 +	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta, 0, &r1);
 +	a6_log("zap: init image raw rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +	if (rc || r1) {
@@ -2031,10 +2033,10 @@ index 0000000..6e61751
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..7a5f4e3
+index 0000000..571ccad
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,553 @@
+@@ -0,0 +1,549 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2346,14 +2348,10 @@ index 0000000..7a5f4e3
 +	/* The TZ only reads non-secure memory that the ADT calls OS RAM: with
 +	 * --highmem that is above 4 GB, so the PAS metadata cannot live in the
 +	 * low pool.  A small managed buffer, written and cleaned by VA. */
-+	vm_offset_t zm = 0;
-+	if (kmem_alloc_contig(kernel_map, &zm, ZAP_META_BUF, PAGE_MASK, 0, 0,
-+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		a6_log("no managed zap metadata buffer\n");
-+		return;
-+	}
-+	zap_kva = zm;
-+	zap_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)zm));
++	/* The TZ PAS metadata must be below 4 GB (the protocol's image address is
++	 * 32-bit) and in non-secure DRAM: use the low pool's zap area. */
++	zap_kva = va + A6_OFF_ZAP_META;
++	zap_pa = pool_pa + A6_OFF_ZAP_META;
 +	thread_t thread;
 +	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS)
 +		thread_deallocate(thread);
