@@ -17,6 +17,12 @@ mkdir -p "$W" "$ROOT/out"
 
 export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:/opt/homebrew/opt/llvm/bin:$PATH"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+# Mesa's meson.build needs a build-machine python with packaging/mako: pin it.
+PY3=$(brew --prefix python 2>/dev/null)/bin/python3
+[ -x "$PY3" ] || PY3=$(command -v python3)
+"$PY3" -m pip install --break-system-packages --quiet packaging mako pyyaml setuptools 2>/dev/null || \
+	python3 -m pip install --quiet packaging mako pyyaml setuptools 2>/dev/null || true
+echo "python: $PY3"
 
 # ---- UniXNU: the mesa patch set -------------------------------------------
 git clone --depth 1 --filter=blob:none --sparse https://github.com/UniXNU/UniXNU.git "$W/unixnu" >/dev/null 2>&1
@@ -54,6 +60,7 @@ objc = '$(xcrun --sdk iphoneos --find clang)'
 ar = '$(xcrun --sdk iphoneos --find ar)'
 strip = '$(xcrun --sdk iphoneos --find strip)'
 pkg-config = '/usr/bin/false'
+python = '$PY3'
 [host_machine]
 system = 'darwin'
 cpu_family = 'aarch64'
@@ -69,7 +76,6 @@ c_link_args = [$FLAGS]
 cpp_link_args = [$FLAGS]
 objc_link_args = [$FLAGS]
 EOF
-python3 -m pip install --quiet mako pyyaml packaging setuptools 2>/dev/null || true
 meson setup "$W/build-ios" "$W/mesa" --cross-file "$W/ios16.cross" \
 	-Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=darwin \
 	-Dtu-darwin-abi-dir="$ROOT/phone/turnip" -Dplatforms=macos -Dglx=disabled \
