@@ -74,8 +74,8 @@ endian = 'little'
 [properties]
 needs_exe_wrapper = true
 [built-in options]
-c_args = [$FLAGS]
-cpp_args = [$FLAGS]
+c_args = [$FLAGS, '-DUTIL_ARCH_LITTLE_ENDIAN']
+cpp_args = [$FLAGS, '-DUTIL_ARCH_LITTLE_ENDIAN']
 objc_args = [$FLAGS]
 c_link_args = [$FLAGS]
 cpp_link_args = [$FLAGS]
@@ -85,7 +85,7 @@ meson setup "$W/build-ios" "$W/mesa" --cross-file "$W/ios16.cross" \
 	-Dgallium-drivers= -Dvulkan-drivers=freedreno -Dfreedreno-kmds=darwin \
 	-Dtu-darwin-abi-dir="$ROOT/phone/turnip" -Dplatforms=macos -Dglx=disabled \
 	-Degl=disabled -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
-	-Dllvm=disabled -Dshared-glapi=disabled -Dxmlconfig=disabled -Dshader-cache=disabled \
+	-Dllvm=disabled -Dshared-glapi=disabled -Dxmlconfig=disabled -Dshader-cache=disabled -Dbuild-tests=false \
 	-Dtools= -Dbuild-tests=false -Dvideo-codecs= -Dvulkan-layers= -Dlibunwind=disabled \
 	-Dlmsensors=disabled -Dvalgrind=disabled -Dexpat=disabled -Dzstd=disabled \
 	-Dbuildtype=release -Db_ndebug=true > "$W/configure.log" 2>&1 || {
