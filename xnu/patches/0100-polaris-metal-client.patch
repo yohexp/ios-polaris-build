@@ -121,6 +121,17 @@ diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
  {
  	static const uint64_t zeros[511];
  	a6_write(a6_pool_pa(g, A6_OFF_GT_L1) + 8, zeros, sizeof(zeros));
+@@ -1749,10 +1851,8 @@
+ 	if (!rc && a6_2d)
+ 		(void)a6_blit_test(g);		/* validation only */
+ 	(void)sweet_gpu_panel_probe();
+ 	sweet_gpu_mem_probe();
+-	if (!rc && a6_v2)
+-		(void)sweet_gpu_v2_test();
+ 	int running = a6_cp_running(g);
+ 
+ 	/* Done touching the GPU: let the GMU power manage it. */
+ 	oob_clear(24);		/* GPU_SET clear */
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 --- a/bsd/dev/sweet_a6xx.h
 +++ b/bsd/dev/sweet_a6xx.h
@@ -843,10 +854,10 @@ index 0000000..0c6e483
 +#endif
 diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
 new file mode 100644
-index 0000000..b1f405d
+index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,750 @@
+@@ -0,0 +1,752 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -975,6 +986,8 @@ index 0000000..b1f405d
 +	IOLock  *fLock;
 +	OSArray *fMem;          /* index + 1 = handle; IOMemoryDescriptor, or kOSBooleanFalse once freed */
 +	OSArray *fMaps;         /* same index: the kernel IOMemoryMap, for cache maintenance */
++
++	uint32_t fLastFence;    /* of this client's last submit */
 +
 +	/* v2 */
 +	bool fV2;
