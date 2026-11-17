@@ -16,6 +16,10 @@ rm -rf "$W" "$ROOT/out"
 mkdir -p "$W" "$ROOT/out"
 
 export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:/opt/homebrew/opt/llvm/bin:$PATH"
+# Mesa's generated sources (flex/bison rules) do not inherit the cross-file
+# c_args; make the target facts global, and expose the BSD dl* API on iOS.
+export CFLAGS="-DUTIL_ARCH_LITTLE_ENDIAN -D_DARWIN_C_SOURCE"
+export CXXFLAGS="-DUTIL_ARCH_LITTLE_ENDIAN -D_DARWIN_C_SOURCE"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 # Mesa's meson.build needs a build-machine python with packaging/mako: pin it.
 PY3=$(brew --prefix python 2>/dev/null)/bin/python3
