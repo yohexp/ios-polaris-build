@@ -293,7 +293,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  /* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
  
-@@ -515,6 +462,345 @@
+@@ -515,5 +462,344 @@
  		stat_clean = stat_copy = 0;
  	}
  	return rc;
@@ -638,30 +638,36 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +	}
 +}
  #endif /* ARM64_BOARD_CONFIG_SWEET */
- 
 diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
 --- a/iokit/conf/files.arm64
 +++ b/iokit/conf/files.arm64
-@@ -13,3 +13,4 @@
+@@ -14,8 +14,9 @@
+ iokit/Kernel/arm/SweetKeyStore.cpp                               optional iokitcpp
  iokit/Kernel/arm/SweetWatchdog.cpp                               optional iokitcpp
  iokit/Kernel/arm/SweetSurface.cpp                                optional iokitcpp
  iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
 +iokit/Kernel/arm/SweetAccelerator.cpp                            optional iokitcpp
-
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -60,5 +60,10 @@
+@@ -81,8 +81,13 @@
+     "     'IOClass'         = SweetBattery;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
      "   },"
- #endif
 +    "   {"
 +    "     'IOClass'         = SweetAccelerator;"
 +    "     'IOProviderClass' = IOResources;"
 +    "     'IOMatchCategory' = SweetAccelerator;"
 +    "   },"
+ #endif
      "   {"
      "     'IOClass'         = IOPanicPlatform;"
-
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
 diff --git a/iokit/Kernel/arm/SweetGPUABI.h b/iokit/Kernel/arm/SweetGPUABI.h
 new file mode 100644
 index 0000000..0c6e483
