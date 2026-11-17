@@ -48,7 +48,7 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..f83eba4
+index 0000000..b30074f
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
 @@ -0,0 +1,1798 @@
@@ -1207,7 +1207,7 @@ index 0000000..f83eba4
 +	}
 +	a6_log("zap: meta %llx, writing %u bytes\n", (unsigned long long)meta, mlen);
 +	a6_zap_meta_write(mdt, mlen);
-+	a6_log("zap: calling PAS INIT_IMAGE\n");
++	stage("zap init image");
 +	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta, 0, &r1);
 +	a6_log("zap: init image raw rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +	if (rc || r1) {
@@ -2033,10 +2033,10 @@ index 0000000..6e61751
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..d4017f9
+index 0000000..4d2033e
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,549 @@
+@@ -0,0 +1,555 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2154,7 +2154,7 @@ index 0000000..d4017f9
 +		return;
 +	}
 +	memcpy((void *)zap_kva, buf, len);
-+	__asm__ volatile ("dsb sy" ::: "memory");	/* uncached pool mapping */
++	flush_dcache64((addr64_t)zap_kva, len, TRUE);
 +}
 +
 +uint32_t
@@ -2348,10 +2348,16 @@ index 0000000..d4017f9
 +	/* The TZ only reads non-secure memory that the ADT calls OS RAM: with
 +	 * --highmem that is above 4 GB, so the PAS metadata cannot live in the
 +	 * low pool.  A small managed buffer, written and cleaned by VA. */
-+	/* The TZ PAS metadata must be below 4 GB (the protocol's image address is
-+	 * 32-bit) and in non-secure DRAM: use the low pool's zap area. */
-+	zap_kva = va + A6_OFF_ZAP_META;
-+	zap_pa = pool_pa + A6_OFF_ZAP_META;
++	/* Managed OS RAM above 4 GB (the ADT's non-secure memory); written and
++	 * cleaned by VA (physical cache ops above 4 GB are unsafe). */
++	vm_offset_t zm = 0;
++	if (kmem_alloc_contig(kernel_map, &zm, ZAP_META_BUF, PAGE_MASK, 0, 0,
++	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
++		a6_log("no managed zap metadata buffer\n");
++		return;
++	}
++	zap_kva = zm;
++	zap_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)zm));
 +	thread_t thread;
 +	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS)
 +		thread_deallocate(thread);
