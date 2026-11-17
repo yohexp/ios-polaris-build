@@ -48,10 +48,10 @@ diff --git a/bsd/dev/sweet_gpu_probe.c b/bsd/dev/sweet_gpu_probe.c
  	printf("SWEET GPU: probe enabled\n");
 diff --git a/bsd/dev/sweet_a6xx.c b/bsd/dev/sweet_a6xx.c
 new file mode 100644
-index 0000000..d464254
+index 0000000..202e428
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1799 @@
+@@ -0,0 +1,1797 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1200,15 +1200,13 @@ index 0000000..d464254
 +	uint64_t r1 = 0;
 +	uint32_t mlen, slen;
 +	const uint8_t *mdt = a6_firmware("a630_zap.mdt", &mlen), *b02 = a6_firmware("a630_zap.b02", &slen);
-+	uint64_t meta = a6_zap_meta_pa();	/* below-4GB non-secure DRAM for the TZ */
++	uint64_t off = A6_OFF_ZAP_META;
++	uint32_t meta = (uint32_t)a6_pool_pa(g, off);	/* TZ PAS image address (physical) */
 +	if (!mdt || !b02 || slen > ZAP_SIZE) {
 +		a6_log("zap: missing a630_zap.mdt/.b02\n");
 +		return -1;
 +	}
-+	a6_log("zap: meta %llx, writing %u bytes\n", (unsigned long long)meta, mlen);
-+	a6_zap_meta_write(mdt, mlen);
-+	stage("zap meta copied");
-+	stage("zap init image");
++	a6_write(a6_pool_pa(g, off), mdt, mlen);
 +	int64_t rc = scm(1, 2 | (2u << 6), PAS_GPU, meta, 0, &r1);
 +	a6_log("zap: init image raw rc %lld r1 %llx\n", (long long)rc, (unsigned long long)r1);
 +	if (rc || r1) {
@@ -1853,10 +1851,10 @@ index 0000000..d464254
 +#endif
 diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 new file mode 100644
-index 0000000..6e61751
+index 0000000..3151052
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,173 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1998,8 +1996,6 @@ index 0000000..6e61751
 +
 +/* Build a 1:1 crop copy (CP_MEMCPY rows) from a surface IOVA to the panel
 + * into the pool at off; returns the dword count. */
-+uint64_t a6_zap_meta_pa(void);	/* environment: managed buffer for PAS INIT_IMAGE */
-+void a6_zap_meta_write(const void *buf, uint32_t len);
 +uint32_t a6_present_ib(struct a6_gpu *g, uint64_t off, uint64_t src, uint32_t sx, uint32_t sy,
 +    uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
 +int a6_map(struct a6_gpu *g, uint64_t iova, uint64_t pa, uint64_t size);
@@ -2034,10 +2030,10 @@ index 0000000..6e61751
 +#endif
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 new file mode 100644
-index 0000000..12b64ec
+index 0000000..3a939da
 --- /dev/null
 +++ b/bsd/dev/sweet_gpu.c
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,519 @@
 +/*
 + * Adreno 630 (SDM845, polaris) in XNU: the environment for the shared core
 + * (sweet_a6xx.c), a kernel thread that runs the bring-up, and the SMC hook
@@ -2089,9 +2085,6 @@ index 0000000..12b64ec
 +
 +static struct a6_gpu gpu;
 +static vm_offset_t pool_kva;
-+static vm_offset_t zap_kva;
-+static uint64_t zap_pa;
-+#define ZAP_META_BUF	0x4000u
 +static volatile bool gpu_ready;
 +static int gpu_sleep_chan;
 +int a6_stage_limit = 99;
@@ -2142,21 +2135,6 @@ index 0000000..12b64ec
 +	return pool_kva && pa >= gpu.pool_pa && pa + len <= gpu.pool_pa + A6_POOL_SIZE;
 +}
 +
-+uint64_t
-+a6_zap_meta_pa(void)
-+{
-+	return zap_pa;
-+}
-+
-+void
-+a6_zap_meta_write(const void *buf, uint32_t len)
-+{
-+	if (zap_kva == 0 || len > ZAP_META_BUF) {
-+		return;
-+	}
-+	memcpy((void *)zap_kva, buf, len);
-+}
-+
 +uint32_t
 +a6_rd(uint64_t pa)
 +{
@@ -2192,7 +2170,7 @@ index 0000000..12b64ec
 +{
 +	if (in_pool(pa, len)) {
 +		memcpy((void *)(pool_kva + (pa - gpu.pool_pa)), buf, len);
-+		__asm__ volatile ("dsb sy" ::: "memory");	/* uncached mapping: DRAM is current */
++		flush_dcache64((addr64_t)pa, (unsigned)len, TRUE);
 +		return 0;
 +	}
 +	if (pmap_valid_address(pa)) {
@@ -2210,7 +2188,7 @@ index 0000000..12b64ec
 +a6_read(uint64_t pa, void *buf, size_t len)
 +{
 +	if (in_pool(pa, len)) {
-+		__asm__ volatile ("dsb sy" ::: "memory");
++		flush_dcache64((addr64_t)pa, (unsigned)len, TRUE);
 +		memcpy(buf, (const void *)(pool_kva + (pa - gpu.pool_pa)), len);
 +		return 0;
 +	}
@@ -2332,32 +2310,16 @@ index 0000000..12b64ec
 +	(void)PE_parse_boot_argn("sweetgpupaint", &a6_paint, sizeof(a6_paint));
 +	(void)PE_parse_boot_argn("sweetgpu2d", &a6_2d, sizeof(a6_2d));
 +	(void)PE_parse_boot_argn("sweetgpu_v2", &a6_v2, sizeof(a6_v2));
-+	/* The GPU (GMU SMMU output, TBU) only reaches 32-bit physical addresses,
-+	 * so the pool must stay below 4 GB.  With the --highmem ADT XNU manages
-+	 * 4 GB.., but the low DRAM 0xb0000000..0x100000000 is left unmanaged and
-+	 * is known-good: map it uncached and use it for the pool (and the v2 BOs). */
-+	uint64_t pool_pa = 0xb0000000ull;
-+	vm_offset_t va = ml_io_map_unmappable((vm_offset_t)pool_pa, A6_POOL_SIZE, VM_WIMG_IO);
-+	if (!va) {
-+		a6_log("no I/O mapping for the GPU pool\n");
-+		return;
-+	}
-+	a6_init_state(&gpu, pool_pa);
-+	pool_kva = va;
-+	__asm__ volatile ("dsb sy" ::: "memory");
-+	/* The TZ only reads non-secure memory that the ADT calls OS RAM: with
-+	 * --highmem that is above 4 GB, so the PAS metadata cannot live in the
-+	 * low pool.  A small managed buffer, written and cleaned by VA. */
-+	/* Managed OS RAM above 4 GB (the ADT's non-secure memory); written and
-+	 * cleaned by VA (physical cache ops above 4 GB are unsafe). */
-+	vm_offset_t zm = 0;
-+	if (kmem_alloc_contig(kernel_map, &zm, ZAP_META_BUF, PAGE_MASK, 0, 0,
++	vm_offset_t va = 0;
++	if (kmem_alloc_contig(kernel_map, &va, A6_POOL_SIZE, PAGE_MASK, 0, (ppnum_t)(atop_64(A6_POOL_ALIGN) - 1),
 +	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
-+		a6_log("no managed zap metadata buffer\n");
++		a6_log("no contiguous pool\n");
 +		return;
 +	}
-+	zap_kva = zm;
-+	zap_pa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)zm));
++	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)va);
++	a6_init_state(&gpu, ptoa_64(pn));
++	pool_kva = va;
++	flush_dcache64((addr64_t)gpu.pool_pa, (unsigned)A6_POOL_SIZE, TRUE);
 +	thread_t thread;
 +	if (kernel_thread_start(gpu_thread, NULL, &thread) == KERN_SUCCESS)
 +		thread_deallocate(thread);
@@ -2420,11 +2382,11 @@ index 0000000..12b64ec
 +
 +/* ---- v2 buffer pool (RAM XNU does not map) and self-test ---- */
 +
-+/* Low DRAM that the --highmem ADT leaves outside XNU's physmap (XNU maps
-+ * 4 GB..7.95 GB).  It was managed RAM before, so it is known-good and
-+ * accessible; no cacheable alias for the write-combined client view. */
-+#define GPOOL_BASE	0xb2000000ull
-+#define GPOOL_LIMIT	0x100000000ull
++/* ADT dram-size is 1.23 GB from 0xb0000000 (XNU's physmap); the DT's second
++ * memory region at 5 GB (0x140000000, 3 GB) is general DRAM outside it.  Use
++ * the first 512 MB for write-combined GPU buffers (no physmap alias). */
++#define GPOOL_BASE	0x140000000ull
++#define GPOOL_LIMIT	0x160000000ull
 +static uint64_t gpool_next = GPOOL_BASE;
 +
 +int
@@ -2449,7 +2411,6 @@ index 0000000..12b64ec
 +		a6_log("v2: pool exhausted\n");
 +		return -1;
 +	}
-+	a6_log("v2: bo %llx, mapping it\n", (unsigned long long)bo_pa);
 +	vm_offset_t bo_va = ml_io_map_unmappable((vm_offset_t)bo_pa, 0x10000, VM_WIMG_IO);
 +	if (!bo_va) {
 +		a6_log("v2: no I/O map for %llx\n", (unsigned long long)bo_pa);
