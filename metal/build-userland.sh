@@ -111,6 +111,19 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 [workspace]
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-2.0-or-later OR LGPL-3.0-or-later"
+authors = ["Anees Iqbal <hello@aneesiqbal.ai>"]
+repository = "https://github.com/steelbrain/metal2vulkan"
+homepage = "https://github.com/steelbrain/metal2vulkan"
+[workspace.dependencies]
+ash = { version = "0.38", default-features = false }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 [lib]
 crate-type = ["staticlib"]
 path = "$ROOT/phone/metal2/bridge/NativeMetalBridge.rs"
