@@ -147,17 +147,19 @@ static bool listed(void)
 		NSString *bundle = [[NSBundle bundleForClass:[SweetMTL2Device class]] bundlePath];
 		NSString *turnip = [bundle stringByAppendingPathComponent:@"libvulkan_freedreno.dylib"];
 		char cache[256];
-		mkdir("/var/local/m2v-cache", 0777);
-		chmod("/var/local/m2v-cache", 0777);
-		snprintf(cache, sizeof(cache), "/var/local/m2v-cache/%s", getprogname());
-		mkdir(cache, 0777);
-		if (access(cache, W_OK) != 0) {
-			/* a sandboxed process: its own caches directory */
-			char dir[256];
-			if (confstr(_CS_DARWIN_USER_CACHE_DIR, dir, sizeof(dir) - 8)) {
-				snprintf(cache, sizeof(cache), "%sm2v", dir);
-				mkdir(cache, 0700);
-			}
+		char dir[256];
+		/* The polaris root is a shared HFSX with a root-owned /var/local and a
+		 * backboardd that cannot write there.  The shader cache only needs to be
+		 * writable and private: use the process's own cache directory, with
+		 * /tmp as the fallback. */
+		if (confstr(_CS_DARWIN_USER_CACHE_DIR, dir, sizeof(dir) - 8)) {
+			snprintf(cache, sizeof(cache), "%sm2v-%s", dir, getprogname());
+			mkdir(cache, 0700);
+			chmod(cache, 0700);
+		} else {
+			snprintf(cache, sizeof(cache), "/tmp/m2v-cache-%s", getprogname());
+			mkdir(cache, 0777);
+			chmod(cache, 0777);
 		}
 		/* plain rows everywhere: no Apple framebuffer compression, no 10-bit deep framebuffer */
 		setenv("CA_DISABLE_FRAMEBUFFER_COMPRESSION", "1", 1);
