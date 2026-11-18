@@ -30,7 +30,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  
  	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
 +	if (sweet_iouc_bypass()) {
-+		filterPolicy = NULL;
++		filterPolicy = 0;
 +	}
  	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
  		ret = gIOUCFilterCallbacks->io_filter_applier(client, filterPolicy, io_filter_type_external_method, selector);
@@ -42,7 +42,7 @@ diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
  	ret = kIOReturnSuccess;
  	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
 +	if (sweet_iouc_bypass()) {
-+		filterPolicy = NULL;
++		filterPolicy = 0;
 +	}
  	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
  		ret = gIOUCFilterCallbacks->io_filter_applier(client, filterPolicy, io_filter_type_external_method, selector);
