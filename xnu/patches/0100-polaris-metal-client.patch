@@ -868,7 +868,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,834 @@
+@@ -0,0 +1,835 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -910,9 +910,6 @@ index 0000000..283c66c
 +#include <IOKit/IOKitKeys.h>
 +#include <IOKit/IOBufferMemoryDescriptor.h>
 +#include <pexpert/pexpert.h>
-+#include <machine/machine_routines.h>
-+#include <arm/caches_internal.h>
-+#include <vm/pmap.h>
 +#include "SweetSurface.h"
 +#include "SweetGPUABI.h"
 +
@@ -932,6 +929,10 @@ index 0000000..283c66c
 +uint64_t sweet_gpu_timestamp(void);
 +int sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa);
 +void sweet_gpu_pool_free(uint64_t pa, uint64_t bytes);
++/* arm/memory_types.h's VM_WIMG_IO: coherent, not cacheable, guarded */
++#define SWEET_VM_WIMG_IO	0x7u
++vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, uint32_t flags);
++void ml_io_unmap(vm_offset_t addr, vm_size_t size);
 +}
 +
 +#define SWEET_V2_OPEN_TYPE      0x4147  /* the darwin backend's default ('AG', as the AGX plugin's) */
@@ -1515,7 +1516,7 @@ index 0000000..283c66c
 +			return kIOReturnNoMemory;
 +		}
 +		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa, len, kIODirectionInOut);
-+		vm_offset_t kva = md != NULL ? ml_io_map_unmappable((vm_offset_t)pa, (vm_size_t)len, VM_WIMG_IO) : 0;
++		vm_offset_t kva = md != NULL ? ml_io_map_unmappable((vm_offset_t)pa, (vm_size_t)len, SWEET_VM_WIMG_IO) : 0;
 +		if (kva == 0) {
 +			OSSafeReleaseNULL(md);
 +			sweet_gpu_pool_free(pa, len);
