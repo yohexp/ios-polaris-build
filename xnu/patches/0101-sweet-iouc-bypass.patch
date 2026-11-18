@@ -1,0 +1,50 @@
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -2606,8 +2606,22 @@
+  * named in boot-arg sweetiolog (comma separated, default "backboardd,SpringBoard";
+  * "-" turns it off) are printed as "IOK name: ...", at most 400 lines per
+  * boot, to find out what a daemon looks for before it gives up.
+  */
++/* The SWEET sandbox stand-in does not model IOUC external-method filters;
++ * with sweetmtl=1 the GPU user client must reach its externalMethod. */
++static int
++sweet_iouc_bypass(void)
++{
++	static int on = -1;
++	if (on < 0) {
++		int v = 0;
++		PE_parse_boot_argn("sweetmtl", &v, sizeof(v));
++		on = v ? 1 : 0;
++	}
++	return on;
++}
++
+ static char sweet_iolog_names[128];
+ static int sweet_iolog_parsed;
+ static uint32_t sweet_iolog_lines;
+ 
+@@ -4962,8 +4976,11 @@
+ 	IOStatisticsClientCall();
+ 	ret = kIOReturnSuccess;
+ 
+ 	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
++	if (sweet_iouc_bypass()) {
++		filterPolicy = NULL;
++	}
+ 	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+ 		ret = gIOUCFilterCallbacks->io_filter_applier(client, filterPolicy, io_filter_type_external_method, selector);
+ 	}
+ 
+@@ -5084,8 +5101,11 @@
+ 
+ 	IOStatisticsClientCall();
+ 	ret = kIOReturnSuccess;
+ 	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
++	if (sweet_iouc_bypass()) {
++		filterPolicy = NULL;
++	}
+ 	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+ 		ret = gIOUCFilterCallbacks->io_filter_applier(client, filterPolicy, io_filter_type_external_method, selector);
+ 	}
+ 	if (kIOReturnSuccess == ret) {
