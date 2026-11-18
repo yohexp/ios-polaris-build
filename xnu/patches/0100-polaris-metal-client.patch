@@ -304,16 +304,22 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  /* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
  
-@@ -515,5 +462,344 @@
+@@ -515,5 +462,355 @@
  		stat_clean = stat_copy = 0;
  	}
  	return rc;
  }
 +
-+/* ---- v2 buffer pool (low ADT: the high bank 4 GB.. is outside the physmap) ---- */
++/* ---- v2 buffer pool: the RAM just above the low ADT, below 4 GB ---- */
 +
-+#define GPOOL_BASE	0x140000000ull
-+#define GPOOL_LIMIT	0x1f0000000ull
++/*
++ * XNU manages 0xb0000000..0xfd000000 (1.23 GB) and nothing else below 4 GB;
++ * the 48 MB above it is DRAM from the DT memory node that nobody maps.  The
++ * GPU's SMMU only translates 32-bit PAs, so the pool must stay below 4 GB,
++ * and not being kernel-managed keeps its write-combined aliases clean.
++ */
++#define GPOOL_BASE	0xfd000000ull
++#define GPOOL_LIMIT	0x100000000ull
 +#define GPOOL_UNIT	0x4000ull
 +#define GPOOL_FREE_MAX	4096
 +
@@ -345,7 +351,12 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +				    (gpool_nfree - i - 1) * sizeof(gpool_free[0]));
 +				gpool_nfree--;
 +			}
++			uint64_t was = gpool_used;
 +			gpool_used += size;
++			if ((gpool_used >> 24) != (was >> 24)) {
++				a6_log("v2 pool: %llu MB in use, %llu MB free\n", gpool_used >> 20,
++				    (GPOOL_LIMIT - GPOOL_BASE - gpool_used) >> 20);
++			}
 +			rc = 0;
 +			break;
 +		}
@@ -852,12 +863,12 @@ index 0000000..0c6e483
 +static_assert(sizeof(NativeAdrenoAbiStatus) == 16, "ABI status layout");
 +#endif
 +#endif
-diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp b/iokit/Kernel/arm/SweetAccelerator.cpp
+diff --git a/iokit/Kernel/arm/SweetAccelerator.cpp
 new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,752 @@
+@@ -0,0 +1,834 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -899,6 +910,9 @@ index 0000000..283c66c
 +#include <IOKit/IOKitKeys.h>
 +#include <IOKit/IOBufferMemoryDescriptor.h>
 +#include <pexpert/pexpert.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
 +#include "SweetSurface.h"
 +#include "SweetGPUABI.h"
 +
@@ -1024,7 +1038,56 @@ index 0000000..283c66c
 +	fLock = IOLockAlloc();
 +	fMem = OSArray::withCapacity(64);
 +	fMaps = OSArray::withCapacity(64);
-+	return fLock != NULL && fMem != NULL && fMaps != NULL;
++	if (fLock == NULL || fMem == NULL || fMaps == NULL) {
++		return false;
++	}
++
++	fLastFence = 0;
++	fV2 = false;
++	fWinBase = fWinSize = 0;
++	fBO = NULL;
++	fBOCap = 0;
++	fPageBuf = NULL;
++	fEpoch = fFaults = 0;
++
++	/*
++	 * v2: the NativeAdreno ABI.  The client gets a 4 GB GPU address window
++	 * of its own (WIN_BASE + n * WIN_SIZE) and allocates every buffer
++	 * inside it; the driver's device info tells Turnip that range.  Any
++	 * other open type keeps the scalar v1 ABI.
++	 */
++	uint32_t mtl = 0;
++	PE_parse_boot_argn("sweetmtl", &mtl, sizeof(mtl));
++	if (mtl && (type == SWEET_V2_OPEN_TYPE || type == SWEET_V2_OPEN_DIRECT)) {
++		uint64_t base = 0, size = 0;
++		if (sweet_gpu_window_alloc(&base, &size) != 0) {
++			IOLog("SWEET MTL: v2 client: no GPU window left\n");
++			return true;
++		}
++		fBOCap = 64;
++		fBO = IONewZero(SweetV2BO, fBOCap);
++		fPageBuf = IONewZero(uint64_t, SWEET_V2_PAGEBUF);
++		if (fBO == NULL || fPageBuf == NULL) {
++			if (fBO != NULL) {
++				IODelete(fBO, SweetV2BO, fBOCap);
++				fBO = NULL;
++			}
++			if (fPageBuf != NULL) {
++				IODelete(fPageBuf, uint64_t, SWEET_V2_PAGEBUF);
++				fPageBuf = NULL;
++			}
++			fBOCap = 0;
++			sweet_gpu_window_free(base);
++			IOLog("SWEET MTL: v2 client: no memory for the BO table\n");
++			return true;
++		}
++		fV2 = true;
++		fWinBase = base;
++		fWinSize = size;
++		IOLog("SWEET MTL: v2 client type 0x%x: window 0x%llx+0x%llx\n",
++		    (unsigned)type, base, size);
++	}
++	return true;
 +}
 +
 +IOReturn
@@ -1044,6 +1107,26 @@ index 0000000..283c66c
 +				md->complete();
 +			}
 +		}
++	}
++	/* v2: unmap the GPU, return pool memory (deferred while a task still
++	 * maps it), and give the address window back. */
++	if (fBO != NULL) {
++		for (uint32_t i = 0; i < fBOCap; i++) {
++			if (fBO[i].md != NULL) {
++				v2Release(&fBO[i]);
++			}
++		}
++		IODelete(fBO, SweetV2BO, fBOCap);
++		fBO = NULL;
++		fBOCap = 0;
++	}
++	if (fPageBuf != NULL) {
++		IODelete(fPageBuf, uint64_t, SWEET_V2_PAGEBUF);
++		fPageBuf = NULL;
++	}
++	if (fWinBase != 0) {
++		sweet_gpu_window_free(fWinBase);
++		fWinBase = fWinSize = 0;
 +	}
 +	OSSafeReleaseNULL(fMem);
 +	OSSafeReleaseNULL(fMaps);
@@ -1138,6 +1221,16 @@ index 0000000..283c66c
 +	const uint64_t *in = args->scalarInput;
 +	uint64_t *out = args->scalarOutput;
 +	uint32_t nin = args->scalarInputCount;
++
++	if (!fV2) {
++		/* Only for a client that opened the v1 ABI: name what it asked for. */
++		static uint32_t logged;
++		if (logged < 8) {
++			logged++;
++			IOLog("SWEET MTL: v1 externalMethod selector %u (scalar in %u, struct in %u)\n",
++			    selector, args->scalarInputCount, args->structureInputSize);
++		}
++	}
 +
 +	if (fV2) {
 +		/* struct methods: tunnelled {'NTNL', method, payload} through any selector, or selector = method */
@@ -1415,22 +1508,22 @@ index 0000000..283c66c
 +		    rq->align_log2 < 12 || rq->align_log2 > 24 || rq->contiguous > 1) {
 +			return kIOReturnBadArgument;
 +		}
-+		/* memory XNU does not manage (sweet_gpu.c: no cacheable alias), zeroed through a WC kernel view */
++		/* Memory XNU does not manage (sweet_gpu.c: no cacheable alias), zeroed through a WC kernel view */
 +		sweet_zombie_sweep();
 +		uint64_t len = round_page_64(rq->bytes), pa = 0;
 +		if (sweet_gpu_pool_alloc(len, &pa)) {
 +			return kIOReturnNoMemory;
 +		}
 +		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa, len, kIODirectionInOut);
-+		IOMemoryMap *km = md != NULL ? md->map(kIOMapWriteCombineCache) : NULL;
-+		if (km == NULL) {
++		vm_offset_t kva = md != NULL ? ml_io_map_unmappable((vm_offset_t)pa, (vm_size_t)len, VM_WIMG_IO) : 0;
++		if (kva == 0) {
 +			OSSafeReleaseNULL(md);
 +			sweet_gpu_pool_free(pa, len);
 +			return kIOReturnNoMemory;
 +		}
-+		bzero((void *)km->getVirtualAddress(), len);
++		bzero((void *)kva, len);
 +		__asm__ volatile ("dsb sy" ::: "memory");
-+		km->release();
++		ml_io_unmap(kva, len);
 +		IOLockLock(fLock);
 +		uint64_t h = 0;
 +		IOReturn r = v2NewSlot(md, rq->bytes, false, &h);
