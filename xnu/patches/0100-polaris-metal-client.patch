@@ -187,7 +187,7 @@ diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -45,8 +45,22 @@
+@@ -45,8 +45,23 @@
  int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
  int sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t sx, uint32_t sy,
      uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
@@ -203,6 +203,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +uint32_t sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bool *busy);
 +int sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns);
 +bool sweet_gpu_fence_done(uint32_t fence);
++uint32_t sweet_gpu_fence_now(void);
 +bool sweet_gpu_lost(uint64_t *epoch, uint32_t last_fence);
 +uint64_t sweet_gpu_recoveries(void);
 +uint64_t sweet_gpu_timestamp(void);
@@ -304,7 +305,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  /* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
  
-@@ -515,5 +462,355 @@
+@@ -515,5 +462,382 @@
  		stat_clean = stat_copy = 0;
  	}
  	return rc;
@@ -522,6 +523,13 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +	lck_mtx_lock(&sweet_gpu_lock);
 +	gpu_note_submit_locked();
 +	uint32_t fence = a6_submit_ibs_async(&gpu, iova, dwords, n, 0);
++	static uint32_t logged;
++	if (logged < 8) {
++		logged++;
++		a6_log("v2 submit %u: %u IB%s, first 0x%llx/%u dwords -> fence %u (last %u, done %u)\n",
++		    logged, n, n == 1 ? "" : "s", (unsigned long long)iova[0], dwords[0], fence,
++		    gpu.fence, a6_fence_read(&gpu));
++	}
 +	lck_mtx_unlock(&sweet_gpu_lock);
 +	*busy = fence == 0 && n > 0 && n <= A6_SUBMIT_MAX;
 +	return fence;
@@ -531,6 +539,12 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +sweet_gpu_fence_done(uint32_t fence)
 +{
 +	return !gpu_ready || a6_fence_done(&gpu, fence);
++}
++
++uint32_t
++sweet_gpu_fence_now(void)
++{
++	return gpu_ready ? a6_fence_read(&gpu) : 0;
 +}
 +
 +int
@@ -554,6 +568,20 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +		}
 +		absolutetime_to_nanoseconds(now - t0, &ns);
 +		if (ns >= timeout_ns) {
++			if (!sweet_gpu_fence_done(fence)) {
++				static uint32_t tlog;
++				if (tlog < 6) {
++					tlog++;
++					uint64_t far = 0;
++					uint32_t syn = 0, fsr;
++					lck_mtx_lock(&sweet_gpu_lock);
++					fsr = a6_fault_status(&gpu, &far, &syn);
++					a6_log("v2 fence %u wait: still %u after %llu ms; fsr %x far %llx syn %x\n",
++					    fence, a6_fence_read(&gpu), ns / 1000000, fsr,
++					    (unsigned long long)far, syn);
++					lck_mtx_unlock(&sweet_gpu_lock);
++				}
++			}
 +			return sweet_gpu_fence_done(fence) ? 0 : 1;
 +		}
 +		delay(20);
@@ -868,7 +896,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,815 @@
+@@ -0,0 +1,822 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -925,6 +953,7 @@ index 0000000..283c66c
 +uint32_t sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bool *busy);
 +int sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns);
 +bool sweet_gpu_lost(uint64_t *epoch, uint32_t last_fence);
++uint32_t sweet_gpu_fence_now(void);
 +uint64_t sweet_gpu_recoveries(void);
 +uint64_t sweet_gpu_timestamp(void);
 +}
@@ -1636,6 +1665,9 @@ index 0000000..283c66c
 +		v2SyncCache();          /* the CPU's writes, before the GPU reads them */
 +		bool busy = false;
 +		uint32_t fence = sweet_gpu_submit_v2(iova, dw, rq->buffer_count, &busy);
++		IOLog("SWEET MTL: submit %u IBs, iova[0] 0x%llx dwords[0] %u wait %llu -> fence %u%s\n",
++		    rq->buffer_count, (unsigned long long)iova[0], dw[0],
++		    (unsigned long long)rq->wait_fence, fence, busy ? " (busy)" : "");
 +		if (fence == 0) {
 +			return busy ? kIOReturnBusy : kIOReturnNotReady;
 +		}
@@ -1646,6 +1678,9 @@ index 0000000..283c66c
 +	case NativeAdrenoMethodWaitFence: {
 +		V2_IN(NativeAdrenoAbiWaitFence);
 +		if (sweet_gpu_wait_fence_ns((uint32_t)rq->fence, rq->timeout_ns)) {
++			IOLog("SWEET MTL: wait fence %llu timeout %llu ns: gpu fence %u\n",
++			    (unsigned long long)rq->fence, (unsigned long long)rq->timeout_ns,
++			    sweet_gpu_fence_now());
 +			return kIOReturnTimeout;
 +		}
 +		v2SyncCache();          /* the GPU's writes, before the CPU reads them */
