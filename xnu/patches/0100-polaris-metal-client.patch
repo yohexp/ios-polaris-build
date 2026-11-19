@@ -187,7 +187,7 @@ diff --git a/bsd/dev/sweet_a6xx.h b/bsd/dev/sweet_a6xx.h
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
-@@ -45,8 +45,23 @@
+@@ -45,8 +45,24 @@
  int sweet_gpu_map_surface(uint64_t key, const uint64_t *pages, uint32_t npages, uint32_t page_size);
  int sweet_gpu_present(int s, uintptr_t kva, uint32_t offset, uint32_t sx, uint32_t sy,
      uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t src_pitch, uint32_t dst_pitch);
@@ -202,6 +202,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +void sweet_gpu_unmap_at(uint64_t iova, uint64_t len);
 +uint32_t sweet_gpu_submit_v2(const uint64_t *iova, const uint32_t *dwords, unsigned n, bool *busy);
 +int sweet_gpu_wait_fence_ns(uint32_t fence, uint64_t timeout_ns);
++void a6_ring_state(const struct a6_gpu *g, const char *what);
 +bool sweet_gpu_fence_done(uint32_t fence);
 +uint32_t sweet_gpu_fence_now(void);
 +bool sweet_gpu_lost(uint64_t *epoch, uint32_t last_fence);
@@ -305,7 +306,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  /* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
  
-@@ -515,5 +462,386 @@
+@@ -515,5 +462,383 @@
  		stat_clean = stat_copy = 0;
  	}
  	return rc;
@@ -579,10 +580,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +					a6_log("v2 fence %u wait: still %u after %llu ms; fsr %x far %llx syn %x\n",
 +					    fence, a6_fence_read(&gpu), ns / 1000000, fsr,
 +					    (unsigned long long)far, syn);
-+					a6_log("v2 ring: rptr %x wptr %x status %x int %x hwfault %x cp_status1 %x\n",
-+					    rd32(GREG(CP_RB_RPTR)), gpu.wptr, rd32(GREG(RBBM_STATUS)),
-+					    rd32(GREG(RBBM_INT_STATUS)), rd32(GREG(CP_HW_FAULT)),
-+					    rd32(GREG(CP_STATUS_1)));
++					a6_ring_state(&gpu, "v2 wait");
 +					lck_mtx_unlock(&sweet_gpu_lock);
 +				}
 +			}
