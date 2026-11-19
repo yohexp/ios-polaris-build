@@ -898,7 +898,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,822 @@
+@@ -0,0 +1,864 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -1042,6 +1042,7 @@ index 0000000..283c66c
 +	IOReturn v2NewSlot(IOMemoryDescriptor *md, uint64_t bytes, bool imported, uint64_t *handle);
 +	void v2Release(SweetV2BO *bo);
 +	void v2SyncCache(void);
++	void v2DumpIb(uint32_t n, const uint64_t *iova, const uint32_t *dwords);
 +
 +public:
 +	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
@@ -1463,6 +1464,40 @@ index 0000000..283c66c
 +	IOLockUnlock(fLock);
 +}
 +
++/* Log the first dwords of a submit's IBs (packet-level diagnosis of a hang). */
++void
++SweetAcceleratorUserClient::v2DumpIb(uint32_t n, const uint64_t *iova, const uint32_t *dwords)
++{
++	for (uint32_t i = 0; i < n; i++) {
++		IOLog("SWEET MTL: submit ib%u 0x%llx %u dwords\n", i,
++		    (unsigned long long)iova[i], dwords[i]);
++	}
++	for (uint32_t i = 0; i < fBOCap; i++) {
++		SweetV2BO *bo = &fBO[i];
++		const uint8_t *va;
++		if (bo->md == NULL || bo->imported || bo->iova == 0) {
++			continue;
++		}
++		if (iova[0] < bo->iova || iova[0] + 4ull * dwords[0] > bo->iova + bo->bytes) {
++			continue;
++		}
++		va = (const uint8_t *)bo->md->getBytesNoCopy();
++		if (va == NULL) {
++			return;
++		}
++		const uint32_t *w = (const uint32_t *)(va + (iova[0] - bo->iova));
++		uint32_t k = dwords[0] < 64 ? dwords[0] : 64;
++		for (uint32_t j = 0; j < k; j += 8) {
++			IOLog("SWEET MTL: ib %x: %08x %08x %08x %08x %08x %08x %08x %08x\n", j,
++			    w[j], j + 1 < k ? w[j + 1] : 0, j + 2 < k ? w[j + 2] : 0,
++			    j + 3 < k ? w[j + 3] : 0, j + 4 < k ? w[j + 4] : 0,
++			    j + 5 < k ? w[j + 5] : 0, j + 6 < k ? w[j + 6] : 0,
++			    j + 7 < k ? w[j + 7] : 0);
++		}
++		return;
++	}
++}
++
 +IOReturn
 +SweetAcceleratorUserClient::v2Method(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize)
 +{
@@ -1665,6 +1700,13 @@ index 0000000..283c66c
 +			return kIOReturnTimeout;
 +		}
 +		v2SyncCache();          /* the CPU's writes, before the GPU reads them */
++		{
++			static uint32_t dumped;
++			if (dumped < 8) {
++				dumped++;
++				v2DumpIb(rq->buffer_count, iova, dw);
++			}
++		}
 +		bool busy = false;
 +		uint32_t fence = sweet_gpu_submit_v2(iova, dw, rq->buffer_count, &busy);
 +		IOLog("SWEET MTL: submit %u IBs, iova[0] 0x%llx dwords[0] %u wait %llu -> fence %u%s\n",
