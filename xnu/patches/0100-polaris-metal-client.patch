@@ -898,7 +898,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,864 @@
+@@ -0,0 +1,868 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -1481,7 +1481,11 @@ index 0000000..283c66c
 +		if (iova[0] < bo->iova || iova[0] + 4ull * dwords[0] > bo->iova + bo->bytes) {
 +			continue;
 +		}
-+		va = (const uint8_t *)bo->md->getBytesNoCopy();
++		IOBufferMemoryDescriptor *bmd = OSDynamicCast(IOBufferMemoryDescriptor, bo->md);
++		if (bmd == NULL) {
++			continue;
++		}
++		va = (const uint8_t *)bmd->getBytesNoCopy();
 +		if (va == NULL) {
 +			return;
 +		}
