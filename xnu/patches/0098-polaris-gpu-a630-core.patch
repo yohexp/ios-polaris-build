@@ -51,7 +51,7 @@ new file mode 100644
 index 0000000..202e428
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1797 @@
+@@ -0,0 +1,1804 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1567,6 +1567,13 @@ index 0000000..202e428
 +	for (uint64_t o = 0; o < A6_FB_SIZE; o += 0x200000)
 +		wr64(l2 + 8 * (((A6_GVA_FB + o) >> 21) & 0x1ff),
 +		     (A6_FB_PA + o) | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
++	/*
++	 * GMEM: UCHE's window is GPU VA 0x100000..0x1fffff (hw_init's
++	 * GMEM_RANGE_MIN/MAX), and the GMEM itself is at pool + 0x100000.
++	 * One 2 MB block for VA 0..0x1fffff aliases the pool there, which is
++	 * what Turnip's device info (gmem_base 0x100000) expects.
++	 */
++	wr64(l2, g->pool_pa | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
 +}
 +
 +static uint64_t pt_alloc(struct a6_gpu *g)

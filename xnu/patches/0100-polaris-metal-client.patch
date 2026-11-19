@@ -868,7 +868,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,854 @@
+@@ -0,0 +1,815 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -898,10 +898,10 @@ index 0000000..283c66c
 + * v2 (IOServiceOpen type 0x4147 or 2): the NativeAdreno ABI v1 (SweetGPUABI.h) that Turnip's darwin
 + * backend speaks (work/turnip, tu_knl_darwin.cc): struct methods, either selector = method or tunnelled
 + * as {'NTNL', method, payload} through any selector. The client picks GPU addresses inside its own
-+ * 4 GB window; buffers are write-combined for the CPU (pageable IOBufferMemoryDescriptors with the WC
-+ * cache mode: their own VM object, so every alias of the pages agrees), non-cacheable for the GPU;
-+ * imports pin the client's own pages (IOSurfaces), whose CPU caches the client maintains itself
-+ * (EL0 dc civac: SCTLR_EL1.UCI is set). Submits take up to 16 IBs (msm's a6xx_submit wrapping).
++ * 4 GB window; buffers are kernel memory mapped cacheable for the client (IOBufferMemoryDescriptor,
++ * kIOMemoryKernelUserShared), and the client cleans/invalidates them around submits because the GPU
++ * does not snoop. Imports pin the client's own pages (IOSurfaces). Submits take up to 16 IBs
++ * (msm's a6xx_submit wrapping).
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <IOKit/IOService.h>
@@ -927,12 +927,6 @@ index 0000000..283c66c
 +bool sweet_gpu_lost(uint64_t *epoch, uint32_t last_fence);
 +uint64_t sweet_gpu_recoveries(void);
 +uint64_t sweet_gpu_timestamp(void);
-+int sweet_gpu_pool_alloc(uint64_t bytes, uint64_t *pa);
-+void sweet_gpu_pool_free(uint64_t pa, uint64_t bytes);
-+/* arm/memory_types.h's VM_WIMG_IO: coherent, not cacheable, guarded */
-+#define SWEET_VM_WIMG_IO	0x7u
-+vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, uint32_t flags);
-+void ml_io_unmap(vm_offset_t addr, vm_size_t size);
 +}
 +
 +#define SWEET_V2_OPEN_TYPE      0x4147  /* the darwin backend's default ('AG', as the AGX plugin's) */
@@ -946,7 +940,6 @@ index 0000000..283c66c
 +	IOMemoryDescriptor *md;         /* NULL: free slot */
 +	uint64_t bytes;                 /* 4K multiple, as asked */
 +	uint64_t iova;                  /* GPU address while mapped, else 0 */
-+	uint64_t pool_pa;               /* allocated: its memory in the GPU pool (sweet_gpu_pool_alloc) */
 +	bool imported;                  /* the client's own pages (no CPU-map token) */
 +};
 +
@@ -1017,6 +1010,7 @@ index 0000000..283c66c
 +	SweetV2BO *v2Find(uint64_t handle);
 +	IOReturn v2NewSlot(IOMemoryDescriptor *md, uint64_t bytes, bool imported, uint64_t *handle);
 +	void v2Release(SweetV2BO *bo);
++	void v2SyncCache(void);
 +
 +public:
 +	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
@@ -1190,7 +1184,8 @@ index 0000000..283c66c
 +		if (md == NULL) {
 +			return kIOReturnBadArgument;
 +		}
-+		*options = (*options & ~kIOMapCacheMask) | kIOMapWriteCombineCache;
++		/* cacheable: v2SyncCache() cleans/invalidates around submits */
++		*options = (*options & ~kIOMapCacheMask) | kIOMapDefaultCache;
 +		*memory = md;
 +		return kIOReturnSuccess;
 +	}
@@ -1390,70 +1385,7 @@ index 0000000..283c66c
 +	return kIOReturnSuccess;
 +}
 +
-+/*
-+ * Pool memory still mapped into some task (a client that freed a buffer before unmapping it, or one
-+ * that died): its descriptor waits here until IOKit has dropped every mapping (retain count back to
-+ * ours), then the memory goes back to the pool. Swept on every v2 allocation.
-+ */
-+static IOLock *sweet_zombie_lock;
-+static OSArray *sweet_zombies;          /* OSData {IOMemoryDescriptor *, pa} */
-+
-+struct sweet_zombie {
-+	IOMemoryDescriptor *md;
-+	uint64_t pa;
-+};
-+
-+static void
-+sweet_zombie_sweep(void)
-+{
-+	if (sweet_zombie_lock == NULL) {
-+		return;
-+	}
-+	IOLockLock(sweet_zombie_lock);
-+	for (unsigned i = 0; sweet_zombies != NULL && i < sweet_zombies->getCount();) {
-+		OSData *d = OSDynamicCast(OSData, sweet_zombies->getObject(i));
-+		const struct sweet_zombie *z = d != NULL ? (const struct sweet_zombie *)d->getBytesNoCopy() : NULL;
-+		if (z != NULL && z->md->getRetainCount() <= 1) {
-+			uint64_t len = z->md->getLength(), pa = z->pa;
-+			z->md->release();
-+			sweet_gpu_pool_free(pa, len);
-+			sweet_zombies->removeObject(i);
-+			continue;
-+		}
-+		i++;
-+	}
-+	IOLockUnlock(sweet_zombie_lock);
-+}
-+
-+static void
-+sweet_pool_release(IOMemoryDescriptor *md, uint64_t pa)
-+{
-+	if (md->getRetainCount() <= 1) {
-+		uint64_t len = md->getLength();
-+		md->release();
-+		sweet_gpu_pool_free(pa, len);
-+		return;
-+	}
-+	if (sweet_zombie_lock == NULL) {
-+		IOLock *l = IOLockAlloc();
-+		if (!OSCompareAndSwapPtr(NULL, l, &sweet_zombie_lock)) {
-+			IOLockFree(l);
-+		}
-+	}
-+	IOLockLock(sweet_zombie_lock);
-+	if (sweet_zombies == NULL) {
-+		sweet_zombies = OSArray::withCapacity(16);
-+	}
-+	struct sweet_zombie z = { md, pa };
-+	OSData *d = OSData::withBytes(&z, sizeof(z));
-+	if (sweet_zombies != NULL && d != NULL) {
-+		sweet_zombies->setObject(d);
-+	}
-+	OSSafeReleaseNULL(d);
-+	IOLockUnlock(sweet_zombie_lock);
-+}
-+
-+/* Unmap from the GPU, unwire, drop (pool memory: once no task maps it any more) */
++/* Unmap from the GPU, drop the client's mapping, release the memory */
 +void
 +SweetAcceleratorUserClient::v2Release(SweetV2BO *bo)
 +{
@@ -1463,13 +1395,41 @@ index 0000000..283c66c
 +	if (bo->iova != 0) {
 +		sweet_gpu_unmap_at(bo->iova, bo->bytes);
 +	}
-+	if (bo->imported) {
-+		bo->md->complete();
-+		bo->md->release();
-+	} else {
-+		sweet_pool_release(bo->md, bo->pool_pa);
-+	}
++	bo->md->complete();
++	bo->md->release();
 +	bzero(bo, sizeof(*bo));
++}
++
++/*
++ * The GPU does not snoop the CPU caches.  v2 buffers are kernel memory the
++ * client maps cacheable (a write-combined alias of managed RAM is not usable:
++ * the physmap keeps its cacheable block mapping for those pages), so clean
++ * what the CPU wrote before the GPU reads it, and invalidate what the GPU
++ * wrote before the CPU reads it.  flush_dcache64 is clean+invalidate.
++ */
++void
++SweetAcceleratorUserClient::v2SyncCache(void)
++{
++	IOLockLock(fLock);
++	for (uint32_t i = 0; i < fBOCap; i++) {
++		SweetV2BO *bo = &fBO[i];
++		if (bo->md == NULL) {
++			continue;
++		}
++		for (uint64_t off = 0; off < bo->bytes;) {
++			IOByteCount seg = 0;
++			addr64_t pa = bo->md->getPhysicalSegment(off, &seg, kIOMemoryMapperNone);
++			if (pa == 0 || seg == 0) {
++				break;
++			}
++			if (seg > bo->bytes - off) {
++				seg = bo->bytes - off;
++			}
++			flush_dcache64(pa, (unsigned)seg, TRUE);
++			off += seg;
++		}
++	}
++	IOLockUnlock(fLock);
 +}
 +
 +IOReturn
@@ -1518,40 +1478,36 @@ index 0000000..283c66c
 +		}
 +		IOLog("SWEET MTL: bo alloc %llu bytes (align %u, contig %u)\n",
 +		    (unsigned long long)rq->bytes, rq->align_log2, rq->contiguous);
-+		/* Memory XNU does not manage (sweet_gpu.c: no cacheable alias), zeroed through a WC kernel view */
-+		sweet_zombie_sweep();
-+		uint64_t len = round_page_64(rq->bytes), pa = 0;
-+		if (sweet_gpu_pool_alloc(len, &pa)) {
-+			IOLog("SWEET MTL: bo pool exhausted at %llu bytes\n", (unsigned long long)len);
++		/*
++		 * Kernel memory, mapped cacheable for the client: a write-combined
++		 * alias of RAM XNU manages is not coherent with the physmap, so
++		 * v2SyncCache() does the cache maintenance around submits instead.
++		 */
++		uint64_t len = round_page_64(rq->bytes);
++		IOBufferMemoryDescriptor *bmd = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut | kIOMemoryKernelUserShared, len, PAGE_SIZE);
++		if (bmd == NULL) {
++			IOLog("SWEET MTL: bo: no memory for %llu bytes\n", (unsigned long long)len);
 +			return kIOReturnNoMemory;
 +		}
-+		IOLog("SWEET MTL: bo pa 0x%llx len 0x%llx\n", (unsigned long long)pa, (unsigned long long)len);
-+		IOMemoryDescriptor *md = IOMemoryDescriptor::withPhysicalAddress(pa, len, kIODirectionInOut);
-+		vm_offset_t kva = md != NULL ? ml_io_map_unmappable((vm_offset_t)pa, (vm_size_t)len, SWEET_VM_WIMG_IO) : 0;
-+		IOLog("SWEET MTL: bo md %p kva 0x%llx, zeroing\n", md, (unsigned long long)kva);
-+		if (kva == 0) {
-+			OSSafeReleaseNULL(md);
-+			sweet_gpu_pool_free(pa, len);
++		if (bmd->prepare() != kIOReturnSuccess) {
++			bmd->release();
 +			return kIOReturnNoMemory;
 +		}
-+		bzero((void *)kva, len);
-+		__asm__ volatile ("dsb sy" ::: "memory");
-+		ml_io_unmap(kva, len);
-+		IOLog("SWEET MTL: bo zeroed\n");
++		void *bva = bmd->getBytesNoCopy();
++		bzero(bva, len);
++		flush_dcache64((addr64_t)bva, (unsigned)len, FALSE);
 +		IOLockLock(fLock);
 +		uint64_t h = 0;
-+		IOReturn r = v2NewSlot(md, rq->bytes, false, &h);
-+		if (r == kIOReturnSuccess) {
-+			fBO[h - 1].pool_pa = pa;
-+		}
++		IOReturn r = v2NewSlot(bmd, rq->bytes, false, &h);
 +		IOLockUnlock(fLock);
 +		if (r != kIOReturnSuccess) {
-+			md->release();
-+			sweet_gpu_pool_free(pa, len);
++			bmd->complete();
++			bmd->release();
 +			return r;
 +		}
 +		rp->handle = h;
-+		IOLog("SWEET MTL: bo handle %llu ready\n", (unsigned long long)h);
++		IOLog("SWEET MTL: bo handle %llu ready (%p)\n", (unsigned long long)h, bmd);
 +		return kIOReturnSuccess;
 +	}
 +	case NativeAdrenoMethodBoImport: {
@@ -1677,6 +1633,7 @@ index 0000000..283c66c
 +		if (rq->wait_fence != 0 && sweet_gpu_wait_fence_ns((uint32_t)rq->wait_fence, rq->wait_timeout_ns)) {
 +			return kIOReturnTimeout;
 +		}
++		v2SyncCache();          /* the CPU's writes, before the GPU reads them */
 +		bool busy = false;
 +		uint32_t fence = sweet_gpu_submit_v2(iova, dw, rq->buffer_count, &busy);
 +		if (fence == 0) {
@@ -1688,7 +1645,11 @@ index 0000000..283c66c
 +	}
 +	case NativeAdrenoMethodWaitFence: {
 +		V2_IN(NativeAdrenoAbiWaitFence);
-+		return sweet_gpu_wait_fence_ns((uint32_t)rq->fence, rq->timeout_ns) ? kIOReturnTimeout : kIOReturnSuccess;
++		if (sweet_gpu_wait_fence_ns((uint32_t)rq->fence, rq->timeout_ns)) {
++			return kIOReturnTimeout;
++		}
++		v2SyncCache();          /* the GPU's writes, before the CPU reads them */
++		return kIOReturnSuccess;
 +	}
 +	case NativeAdrenoMethodGetTimestamp: {
 +		V2_OUT(NativeAdrenoAbiTimestamp);
