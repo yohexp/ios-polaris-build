@@ -305,7 +305,7 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
  
  /* ---- panel present (SweetFramebuffer.cpp, boot-arg sweetfbgpu=1) ---- */
  
-@@ -515,5 +462,382 @@
+@@ -515,5 +462,386 @@
  		stat_clean = stat_copy = 0;
  	}
  	return rc;
@@ -579,6 +579,10 @@ diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
 +					a6_log("v2 fence %u wait: still %u after %llu ms; fsr %x far %llx syn %x\n",
 +					    fence, a6_fence_read(&gpu), ns / 1000000, fsr,
 +					    (unsigned long long)far, syn);
++					a6_log("v2 ring: rptr %x wptr %x status %x int %x hwfault %x cp_status1 %x\n",
++					    rd32(GREG(CP_RB_RPTR)), gpu.wptr, rd32(GREG(RBBM_STATUS)),
++					    rd32(GREG(RBBM_INT_STATUS)), rd32(GREG(CP_HW_FAULT)),
++					    rd32(GREG(CP_STATUS_1)));
 +					lck_mtx_unlock(&sweet_gpu_lock);
 +				}
 +			}
