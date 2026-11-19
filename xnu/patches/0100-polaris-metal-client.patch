@@ -898,7 +898,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,868 @@
+@@ -0,0 +1,880 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -1464,7 +1464,10 @@ index 0000000..283c66c
 +	IOLockUnlock(fLock);
 +}
 +
-+/* Log the first dwords of a submit's IBs (packet-level diagnosis of a hang). */
++/*
++ * Packet-level dump of a submit's IBs: enough to see what the CP is asked to
++ * do (type-7 opcodes with payloads, type-4 register writes).
++ */
 +void
 +SweetAcceleratorUserClient::v2DumpIb(uint32_t n, const uint64_t *iova, const uint32_t *dwords)
 +{
@@ -1472,33 +1475,42 @@ index 0000000..283c66c
 +		IOLog("SWEET MTL: submit ib%u 0x%llx %u dwords\n", i,
 +		    (unsigned long long)iova[i], dwords[i]);
 +	}
-+	for (uint32_t i = 0; i < fBOCap; i++) {
-+		SweetV2BO *bo = &fBO[i];
-+		const uint8_t *va;
-+		if (bo->md == NULL || bo->imported || bo->iova == 0) {
++	for (uint32_t i = 0; i < n; i++) {
++		const uint32_t *w = NULL;
++		for (uint32_t b = 0; b < fBOCap && w == NULL; b++) {
++			SweetV2BO *bo = &fBO[b];
++			IOBufferMemoryDescriptor *bmd;
++			if (bo->md == NULL || bo->imported || bo->iova == 0 ||
++			    iova[i] < bo->iova || iova[i] + 4ull * dwords[i] > bo->iova + bo->bytes) {
++				continue;
++			}
++			bmd = OSDynamicCast(IOBufferMemoryDescriptor, bo->md);
++			if (bmd == NULL || bmd->getBytesNoCopy() == NULL) {
++				continue;
++			}
++			w = (const uint32_t *)((const uint8_t *)bmd->getBytesNoCopy() + (iova[i] - bo->iova));
++		}
++		if (w == NULL) {
 +			continue;
 +		}
-+		if (iova[0] < bo->iova || iova[0] + 4ull * dwords[0] > bo->iova + bo->bytes) {
-+			continue;
++		for (uint32_t pc = 0, lines = 0; pc < dwords[i] && lines < 600; lines++) {
++			uint32_t h = w[pc], type = h >> 28;
++			if (type == 7) {
++				uint32_t op = (h >> 16) & 0xfff, cnt = h & 0xffff;
++				IOLog("SWEET MTL: ib%u @%u t7 %03x n=%u: %08x %08x %08x %08x\n", i, pc, op, cnt,
++				    cnt > 0 ? w[pc + 1] : 0, cnt > 1 ? w[pc + 2] : 0,
++				    cnt > 2 ? w[pc + 3] : 0, cnt > 3 ? w[pc + 4] : 0);
++				pc += 1 + cnt;
++			} else if (type == 4) {
++				uint32_t reg = (h >> 8) & 0xfffff, cnt = h & 0xff;
++				IOLog("SWEET MTL: ib%u @%u t4 %05x n=%u: %08x\n", i, pc, reg, cnt,
++				    pc + 1 < dwords[i] ? w[pc + 1] : 0);
++				pc += 1 + cnt;
++			} else {
++				IOLog("SWEET MTL: ib%u @%u t%u: %08x\n", i, pc, type, h);
++				pc++;
++			}
 +		}
-+		IOBufferMemoryDescriptor *bmd = OSDynamicCast(IOBufferMemoryDescriptor, bo->md);
-+		if (bmd == NULL) {
-+			continue;
-+		}
-+		va = (const uint8_t *)bmd->getBytesNoCopy();
-+		if (va == NULL) {
-+			return;
-+		}
-+		const uint32_t *w = (const uint32_t *)(va + (iova[0] - bo->iova));
-+		uint32_t k = dwords[0] < 64 ? dwords[0] : 64;
-+		for (uint32_t j = 0; j < k; j += 8) {
-+			IOLog("SWEET MTL: ib %x: %08x %08x %08x %08x %08x %08x %08x %08x\n", j,
-+			    w[j], j + 1 < k ? w[j + 1] : 0, j + 2 < k ? w[j + 2] : 0,
-+			    j + 3 < k ? w[j + 3] : 0, j + 4 < k ? w[j + 4] : 0,
-+			    j + 5 < k ? w[j + 5] : 0, j + 6 < k ? w[j + 6] : 0,
-+			    j + 7 < k ? w[j + 7] : 0);
-+		}
-+		return;
 +	}
 +}
 +
@@ -1706,7 +1718,7 @@ index 0000000..283c66c
 +		v2SyncCache();          /* the CPU's writes, before the GPU reads them */
 +		{
 +			static uint32_t dumped;
-+			if (dumped < 8) {
++			if (dumped < 2 && rq->buffer_count >= 3) {
 +				dumped++;
 +				v2DumpIb(rq->buffer_count, iova, dw);
 +			}
