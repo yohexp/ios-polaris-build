@@ -1869,7 +1869,7 @@ new file mode 100644
 index 0000000..3151052
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,173 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -2006,8 +2006,6 @@ index 0000000..3151052
 +uint32_t a6_pkt4(uint32_t reg, uint32_t cnt);
 +
 +int a6_ring(struct a6_gpu *g, const uint32_t *dw, uint32_t n, const char *what, unsigned timeout_ms);
-+/* rptr/wptr and the CP/ring status registers, for a hung submit's log */
-+void a6_ring_state(const struct a6_gpu *g, const char *what);
 +int a6_submit_ib(struct a6_gpu *g, uint64_t iova, uint32_t dwords, unsigned timeout_ms);
 +uint32_t a6_fence_read(const struct a6_gpu *g);
 +
