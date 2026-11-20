@@ -51,7 +51,7 @@ new file mode 100644
 index 0000000..202e428
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.c
-@@ -0,0 +1,1812 @@
+@@ -0,0 +1,1824 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core.  See sweet_a6xx.h for the pool layout
 + * and the a630-specific deltas.
@@ -1564,6 +1564,8 @@ index 0000000..202e428
 +
 +/* ---- GPU page tables ---- */
 +
++static uint64_t pt_alloc(struct a6_gpu *g);
++
 +static void map_gpu_low(struct a6_gpu *g)
 +{
 +	uint64_t l1 = a6_pool_pa(g, A6_OFF_GT_L1), l2 = a6_pool_pa(g, A6_OFF_GT_L2);
@@ -1577,11 +1579,21 @@ index 0000000..202e428
 +		     (A6_FB_PA + o) | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
 +	/*
 +	 * GMEM: UCHE's window is GPU VA 0x100000..0x1fffff (hw_init's
-+	 * GMEM_RANGE_MIN/MAX), and the GMEM itself is at pool + 0x100000.
-+	 * One 2 MB block for VA 0..0x1fffff aliases the pool there, which is
-+	 * what Turnip's device info (gmem_base 0x100000) expects.
++	 * GMEM_RANGE_MIN/MAX).  It needs memory of its own: aliasing the pool
++	 * here would put the GPU page tables (pool + 0x100000) behind GMEM, so
++	 * a tiled render pass would overwrite the tables that translate the
++	 * ring and the buffers it is reading.  A 4K table covers VA 0..2 MB;
++	 * only the GMEM half of it is mapped.
 +	 */
-+	wr64(l2, g->pool_pa | (1u << 10) | (3u << 8) | (1u << 6) | 1u);
++	uint64_t gmem_l3 = pt_alloc(g);
++	if (gmem_l3 != 0) {
++		wr64(l2, gmem_l3 | 3);
++		for (uint64_t o = 0; o < A6_GMEM_SIZE; o += 0x1000)
++			wr64(gmem_l3 + 8 * ((0x100000ull + o) >> 12),
++			     (g->pool_pa + A6_OFF_GMEM + o) | (1u << 10) | (3u << 8) | (1u << 6) | 3u);
++	} else {
++		a6_log("gmem: no page table for VA 0x100000\n");
++	}
 +}
 +
 +static uint64_t pt_alloc(struct a6_gpu *g)
@@ -1869,7 +1881,7 @@ new file mode 100644
 index 0000000..3151052
 --- /dev/null
 +++ b/bsd/dev/sweet_a6xx.h
-@@ -0,0 +1,173 @@
+@@ -0,0 +1,175 @@
 +/*
 + * Adreno 630 (SDM845, polaris) core shared by the kernel bring-up
 + * (bsd/dev/sweet_gpu.c) and, later, the userland tool.
@@ -1897,6 +1909,7 @@ index 0000000..3151052
 + *   pool + 0x200000  SQE microcode
 + *   pool + 0x210000  ringbuffer (32 KB)
 + *   pool + 0x218000  scratch: fence (+0), selftest value (+0x100), ...
++ *   pool + 0x900000  GMEM (1 MB), at GPU VA 0x100000..0x1fffff
 + *
 + * GPU VA (39 bits): the pool at 0x10000000, the panel framebuffer at
 + * 0x20000000, everything else from 4 GB up.
@@ -1923,6 +1936,7 @@ index 0000000..3151052
 +#define A6_OFF_SCRATCH		0x218000ull
 +#define A6_OFF_FREE		0x400000ull
 +#define A6_OFF_PRESENT		0x800000ull	/* CP_MEMCPY present IB (52 KB) */
++#define A6_OFF_GMEM		0x900000ull	/* 1 MB GMEM, mapped at GPU VA 0x100000 */
 +
 +#define A6_GVA_POOL		0x10000000ull
 +#define A6_GVA_FB		0x20000000ull
