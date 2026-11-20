@@ -898,7 +898,7 @@ new file mode 100644
 index 0000000..283c66c
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetAccelerator.cpp
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,883 @@
 +/*
 + * The GPU as Metal sees it. Metal.framework (MTLRegisterDevices) iterates
 + * IOServiceMatching("IOAcceleratorES"), loads
@@ -1493,16 +1493,19 @@ index 0000000..283c66c
 +		if (w == NULL) {
 +			continue;
 +		}
-+		for (uint32_t pc = 0, lines = 0; pc < dwords[i] && lines < 600; lines++) {
++		for (uint32_t pc = 0, lines = 0; pc < dwords[i] && lines < 2000; lines++) {
 +			uint32_t h = w[pc], type = h >> 28;
 +			if (type == 7) {
-+				uint32_t op = (h >> 16) & 0xfff, cnt = h & 0xffff;
-+				IOLog("SWEET MTL: ib%u @%u t7 %03x n=%u: %08x %08x %08x %08x\n", i, pc, op, cnt,
++				/* PM4: opcode bits 22:16, size bits 13:0, parity in 15/23 */
++				uint32_t op = (h >> 16) & 0x7f, cnt = h & 0x3fff;
++				IOLog("SWEET MTL: ib%u @%u t7 %02x n=%u: %08x %08x %08x %08x %08x %08x\n", i, pc, op, cnt,
 +				    cnt > 0 ? w[pc + 1] : 0, cnt > 1 ? w[pc + 2] : 0,
-+				    cnt > 2 ? w[pc + 3] : 0, cnt > 3 ? w[pc + 4] : 0);
++				    cnt > 2 ? w[pc + 3] : 0, cnt > 3 ? w[pc + 4] : 0,
++				    cnt > 4 ? w[pc + 5] : 0, cnt > 5 ? w[pc + 6] : 0);
 +				pc += 1 + cnt;
 +			} else if (type == 4) {
-+				uint32_t reg = (h >> 8) & 0xfffff, cnt = h & 0xff;
++				/* PM4: register bits 25:8 (18 bits), size bits 6:0 */
++				uint32_t reg = (h >> 8) & 0x3ffff, cnt = h & 0x7f;
 +				IOLog("SWEET MTL: ib%u @%u t4 %05x n=%u: %08x\n", i, pc, reg, cnt,
 +				    pc + 1 < dwords[i] ? w[pc + 1] : 0);
 +				pc += 1 + cnt;
